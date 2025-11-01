@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+STATUS=0
+MISSING_TOOLS=()
+MISSING_LIBS=()
+
+check_tool() {
+    local tool="$1"
+    local hint="$2"
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        STATUS=1
+        MISSING_TOOLS+=("$tool — $hint")
+    fi
+}
+
+check_pkg() {
+    local pkg="$1"
+    local hint="$2"
+    if ! pkg-config --exists "$pkg" 2>/dev/null; then
+        STATUS=1
+        MISSING_LIBS+=("$pkg — $hint")
+    fi
+}
+
+echo "Checking build dependencies for aiChat..."
+
+check_tool "gcc" "Install GCC (e.g., sudo apt install build-essential)."
+check_tool "make" "Install GNU Make (e.g., sudo apt install build-essential)."
+check_tool "pkg-config" "Install pkg-config (e.g., sudo apt install pkg-config)."
+
+if command -v pkg-config >/dev/null 2>&1; then
+    check_pkg "libcurl" "Install libcurl development files (e.g., sudo apt install libcurl4-openssl-dev)."
+    check_pkg "json-c" "Install json-c development files (e.g., sudo apt install libjson-c-dev)."
+else
+    STATUS=1
+fi
+
+if (( STATUS == 0 )); then
+    echo "All required tools and libraries are available. You are ready to build!"
+    exit 0
+fi
+
+if ((${#MISSING_TOOLS[@]} > 0)); then
+    echo
+    echo "Missing build tools:"
+    for entry in "${MISSING_TOOLS[@]}"; do
+        echo "  - $entry"
+    done
+fi
+
+if ((${#MISSING_LIBS[@]} > 0)); then
+    echo
+    echo "Missing development libraries:"
+    for entry in "${MISSING_LIBS[@]}"; do
+        echo "  - $entry"
+    done
+fi
+
+if ! command -v pkg-config >/dev/null 2>&1; then
+    echo
+    echo "pkg-config is required to detect installed libraries. Install it first, then re-run ./configure."
+fi
+
+echo
+echo "Install the missing components listed above and re-run ./configure."
+exit 1
