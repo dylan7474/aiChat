@@ -697,15 +697,23 @@ int main(void) {
     struct sockaddr_in address;
     int opt = 1;
     int port = DEFAULT_PORT;
+    int requested_port = DEFAULT_PORT;
+    int fallback_used = 0;
+    int port_from_env = 0;
     const char *port_env = getenv("AICHAT_PORT");
     const char *ollama_url = get_ollama_url();
 
     if (port_env && *port_env) {
-        int parsed = atoi(port_env);
-        if (parsed > 0 && parsed < 65535) {
-            port = parsed;
+        char *endptr = NULL;
+        long parsed = strtol(port_env, &endptr, 10);
+        if (endptr && *endptr == '\0' && parsed > 0 && parsed < 65535) {
+            port = (int)parsed;
+            port_from_env = 1;
+        } else {
+            fprintf(stderr, "Warning: invalid AICHAT_PORT '%s', using default %d.\n", port_env, DEFAULT_PORT);
         }
     }
+    requested_port = port;
 
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd == -1) {
@@ -725,15 +733,38 @@ int main(void) {
     address.sin_port = htons((uint16_t)port);
 
     if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
-        perror("bind");
+        if (!port_from_env && errno == EADDRINUSE) {
+            fprintf(stderr, "Port %d unavailable, selecting a free port instead.\n", requested_port);
+            address.sin_port = htons(0);
+            if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
+                perror("bind");
+                close(server_fd);
+                return EXIT_FAILURE;
+            }
+            fallback_used = 1;
+        } else {
+            perror("bind");
+            close(server_fd);
+            return EXIT_FAILURE;
+        }
+    }
+
+    socklen_t addrlen = sizeof(address);
+    if (getsockname(server_fd, (struct sockaddr *)&address, &addrlen) < 0) {
+        perror("getsockname");
         close(server_fd);
         return EXIT_FAILURE;
     }
+    port = ntohs(address.sin_port);
 
     if (listen(server_fd, 10) < 0) {
         perror("listen");
         close(server_fd);
         return EXIT_FAILURE;
+    }
+
+    if (fallback_used) {
+        printf("Fell back to port %d.\n", port);
     }
 
     printf("aiChat web server ready on http://127.0.0.1:%d\n", port);

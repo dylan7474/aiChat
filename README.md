@@ -31,8 +31,10 @@ sudo apt-get install -y \
 3. `make -f Makefile.win`
 4. Run the generated `aichat.exe` from the same shell.
 
-The server listens on port `8080` by default. Override it by setting `AICHAT_PORT`, e.g. `AICHAT_PORT=9000 ./aichat`. The
-Ollama API endpoint defaults to `http://127.0.0.1:11434/api/generate` and can be changed by exporting `OLLAMA_URL`.
+The server listens on port `8080` by default. If that port is already taken, aiChat automatically falls back to an
+available port and prints the new URL in the terminal. Override the port explicitly by setting `AICHAT_PORT`, e.g.
+`AICHAT_PORT=9000 ./aichat`. The Ollama API endpoint defaults to `http://127.0.0.1:11434/api/generate` and can be changed
+by exporting `OLLAMA_URL`.
 
 ## Basic Controls
 1. Run `./aichat` and wait for the console message confirming the URL (defaults to `http://127.0.0.1:8080`).
