@@ -26,7 +26,8 @@
 #define MAX_MODEL_LENGTH 256
 #define MIN_TURNS 1
 #define MAX_TURNS 12
-#define DEFAULT_PORT 8080
+#define DEFAULT_PORT 17863
+#define FALLBACK_PORT_STEPS 3
 #define READ_BUFFER_CHUNK 4096
 
 struct MemoryStruct {
@@ -729,6 +730,7 @@ static const char *get_html_page(void) {
            "    let availableModels = [];\n"
            "    const modelSelects = new Set();\n"
            "    let modelLoadError = false;\n"
+           "    let missingModelWarning = false;\n"
            "    const colorPalette = [\n"
            "      { background: '#eff6ff', border: '#3b82f6' },\n"
            "      { background: '#ecfdf5', border: '#10b981' },\n"
@@ -760,21 +762,17 @@ static const char *get_html_page(void) {
            "      transcriptEl.scrollTop = transcriptEl.scrollHeight;\n"
            "    }\n"
            "    function populateModelOptions(select, selectedModel) {\n"
-           "      const previousValue = selectedModel || select.value || '';\n"
+           "      const datasetValue = (select.dataset.desiredModel || '').trim();\n"
+           "      const providedValue = (selectedModel && typeof selectedModel === 'string') ? selectedModel.trim() : '';\n"
+           "      const currentValue = (select.value && typeof select.value === 'string') ? select.value.trim() : '';\n"
+           "      const requestedValue = providedValue || datasetValue || currentValue;\n"
            "      select.innerHTML = '';\n"
            "      const placeholder = document.createElement('option');\n"
            "      placeholder.value = '';\n"
            "      placeholder.textContent = modelLoadError\n"
            "        ? 'Unable to load models'\n"
            "        : (availableModels.length ? 'Select a model' : 'Loading models...');\n"
-           "      if (availableModels.length === 0 && !modelLoadError) {\n"
-           "        placeholder.selected = true;\n"
-           "      } else {\n"
-           "        placeholder.disabled = true;\n"
-           "        if (!previousValue) {\n"
-           "          placeholder.selected = true;\n"
-           "        }\n"
-           "      }\n"
+           "      placeholder.disabled = availableModels.length > 0;\n"
            "      select.appendChild(placeholder);\n"
            "      let hasMatch = false;\n"
            "      availableModels.forEach((item) => {\n"
@@ -783,33 +781,61 @@ static const char *get_html_page(void) {
            "        option.textContent = item.name && item.name !== item.model\n"
            "          ? `${item.name} (${item.model})`\n"
            "          : item.model;\n"
-           "        if (item.model === previousValue) {\n"
+           "        if (item.model === requestedValue) {\n"
            "          option.selected = true;\n"
            "          hasMatch = true;\n"
            "        }\n"
            "        select.appendChild(option);\n"
            "      });\n"
-           "      if (previousValue && !hasMatch) {\n"
-           "        const customOption = document.createElement('option');\n"
-           "        customOption.value = previousValue;\n"
-           "        customOption.textContent = previousValue;\n"
-           "        customOption.selected = true;\n"
-           "        select.appendChild(customOption);\n"
+           "      if (availableModels.length === 0) {\n"
+           "        placeholder.selected = true;\n"
+           "        if (requestedValue) {\n"
+           "          select.dataset.desiredModel = requestedValue;\n"
+           "        }\n"
+           "      } else if (hasMatch) {\n"
+           "        select.dataset.desiredModel = requestedValue;\n"
+           "      } else {\n"
+           "        placeholder.selected = true;\n"
+           "        if (requestedValue && !missingModelWarning) {\n"
+           "          missingModelWarning = true;\n"
+           "          if (!statusEl.textContent) {\n"
+           "            statusEl.textContent = 'A previously selected model is no longer available.';\n"
+           "          }\n"
+           "        }\n"
+           "        delete select.dataset.desiredModel;\n"
            "      }\n"
            "    }\n"
            "    function registerModelSelect(select, selectedModel) {\n"
+           "      if (selectedModel) {\n"
+           "        select.dataset.desiredModel = selectedModel;\n"
+           "      }\n"
+           "      select.addEventListener('change', () => {\n"
+           "        if (select.value) {\n"
+           "          select.dataset.desiredModel = select.value;\n"
+           "        } else {\n"
+           "          delete select.dataset.desiredModel;\n"
+           "        }\n"
+           "        if (statusEl.textContent === 'A previously selected model is no longer available.') {\n"
+           "          statusEl.textContent = '';\n"
+           "        }\n"
+           "      });\n"
            "      modelSelects.add(select);\n"
            "      populateModelOptions(select, selectedModel);\n"
            "    }\n"
            "    function unregisterModelSelect(select) {\n"
-           "      modelSelects.delete(select);\n"
-           "    }\n"
-           "    function refreshModelSelects() {\n"
-           "      modelSelects.forEach((select) => {\n"
-           "        populateModelOptions(select, select.value);\n"
-           "      });\n"
-           "    }\n"
+            "      modelSelects.delete(select);\n"
+            "    }\n"
+            "    function refreshModelSelects() {\n"
+            "      modelSelects.forEach((select) => {\n"
+           "        const desired = select.dataset.desiredModel || select.value;\n"
+           "        populateModelOptions(select, desired);\n"
+            "      });\n"
+            "    }\n"
            "    async function loadModels() {\n"
+           "      missingModelWarning = false;\n"
+           "      if (statusEl.textContent === 'A previously selected model is no longer available.') {\n"
+           "        statusEl.textContent = '';\n"
+           "      }\n"
            "      try {\n"
            "        const response = await fetch('/models');\n"
            "        if (!response.ok) {\n"
@@ -1326,23 +1352,25 @@ int main(void) {
     memset(&address, 0, sizeof(address));
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = INADDR_ANY;
-    address.sin_port = htons((uint16_t)port);
 
-    if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
-        if (!port_from_env && errno == EADDRINUSE) {
-            fprintf(stderr, "Port %d unavailable, selecting a free port instead.\n", requested_port);
-            address.sin_port = htons(0);
-            if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
-                perror("bind");
-                close(server_fd);
-                return EXIT_FAILURE;
+    for (int attempt = 0; attempt <= FALLBACK_PORT_STEPS; ++attempt) {
+        address.sin_port = htons((uint16_t)port);
+        if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) == 0) {
+            if (attempt > 0) {
+                fallback_used = 1;
             }
-            fallback_used = 1;
-        } else {
+            break;
+        }
+
+        if (!(errno == EADDRINUSE && !port_from_env && attempt < FALLBACK_PORT_STEPS)) {
             perror("bind");
             close(server_fd);
             return EXIT_FAILURE;
         }
+
+        int next_port = DEFAULT_PORT + attempt + 1;
+        fprintf(stderr, "Port %d unavailable, trying %d instead.\n", port, next_port);
+        port = next_port;
     }
 
     socklen_t addrlen = sizeof(address);
@@ -1360,7 +1388,7 @@ int main(void) {
     }
 
     if (fallback_used) {
-        printf("Fell back to port %d.\n", port);
+        printf("Port %d unavailable, using fallback port %d.\n", requested_port, port);
     }
 
     printf("aiChat web server ready on http://127.0.0.1:%d\n", port);
