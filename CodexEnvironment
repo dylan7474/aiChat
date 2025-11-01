@@ -1,0 +1,15 @@
+{
+  "os": "ubuntu-22.04",
+  "shell": "/bin/bash",
+  "packages": [
+    "build-essential",
+    "pkg-config",
+    "libjson-c-dev"
+  ],
+  "commands": [
+    "./configure",
+    "make",
+    "make -f Makefile.win"
+  ],
+  "notes": "Ensure pkg-config can locate json-c; run ./configure prior to building to verify prerequisites."
+}
