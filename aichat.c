@@ -15,11 +15,12 @@
 #include <json-c/json.h>
 
 #define DEFAULT_OLLAMA_URL "http://127.0.0.1:11434/api/generate"
-#define SYSTEM_PROMPT                                                                            \
-    "You are a helpful and creative AI assistant in a conversation with other friendly AI "   \
-    "companions. The user has started the conversation with a topic. Engage in a natural, "    \
-    "back-and-forth discussion, building on what the other AI says. Keep your responses "      \
-    "concise.\n\n"
+#define SYSTEM_PROMPT                                                                                 \
+    "You are a helpful and creative AI assistant in a conversation with other friendly AI "        \
+    "companions. The user has started the conversation with a topic. Engage in a natural, "         \
+    "back-and-forth discussion, building on what the other AI says. Keep your responses "           \
+    "concise. Speak directly as your assigned participant without narrating the conversation "      \
+    "structure, and never reveal your internal thinking—share only your final reply.\n\n"
 
 #define MAX_PARTICIPANTS 6
 #define MAX_NAME_LENGTH 64
@@ -66,6 +67,170 @@ static size_t WriteMemoryCallback(void *contents, size_t size, size_t nmemb, voi
     mem->size += realsize;
     mem->memory[mem->size] = '\0';
     return realsize;
+}
+
+static void trim_leading_whitespace(char *text) {
+    char *start = NULL;
+
+    if (!text) {
+        return;
+    }
+
+    start = text;
+    while (*start && isspace((unsigned char)*start)) {
+        start++;
+    }
+    if (start != text) {
+        memmove(text, start, strlen(start) + 1);
+    }
+}
+
+static void trim_trailing_whitespace(char *text) {
+    size_t length = 0;
+
+    if (!text) {
+        return;
+    }
+
+    length = strlen(text);
+    while (length > 0) {
+        unsigned char ch = (unsigned char)text[length - 1];
+        if (!isspace(ch)) {
+            break;
+        }
+        text[length - 1] = '\0';
+        length--;
+    }
+}
+
+static void remove_tagged_section(char *text, const char *open_tag, const char *close_tag) {
+    size_t open_len = 0;
+    size_t close_len = 0;
+
+    if (!text || !open_tag || !close_tag) {
+        return;
+    }
+
+    open_len = strlen(open_tag);
+    close_len = strlen(close_tag);
+    if (open_len == 0 || close_len == 0) {
+        return;
+    }
+
+    while (*text) {
+        char *start = strcasestr(text, open_tag);
+        char *end = NULL;
+
+        if (!start) {
+            return;
+        }
+
+        end = strcasestr(start + open_len, close_tag);
+        if (end) {
+            end += close_len;
+            memmove(start, end, strlen(end) + 1);
+        } else {
+            *start = '\0';
+            return;
+        }
+    }
+}
+
+static void remove_leading_metadata_block(char *text) {
+    static const char *const prefixes[] = {"thought:",         "thinking:",      "thoughts:",
+                                           "analysis:",        "reasoning:",     "chain of thought:",
+                                           "internal monologue:", "scratchpad:", "plan:"};
+    static const char *const markers[] = {"\nanswer:",      "\nfinal answer:", "\nresponse:",
+                                          "\nreply:",       "\nfinal:",        "\noutput:",
+                                          "\nresult:"};
+    char *start = NULL;
+
+    if (!text) {
+        return;
+    }
+
+    trim_leading_whitespace(text);
+    start = text;
+
+    for (size_t i = 0; i < (sizeof(prefixes) / sizeof(prefixes[0])); ++i) {
+        size_t prefix_len = strlen(prefixes[i]);
+        if (strncasecmp(start, prefixes[i], prefix_len) == 0) {
+            char *search_start = start + prefix_len;
+            char *removal_end = NULL;
+
+            for (size_t j = 0; j < (sizeof(markers) / sizeof(markers[0])); ++j) {
+                char *candidate = strcasestr(search_start, markers[j]);
+                if (candidate && (!removal_end || candidate < removal_end)) {
+                    removal_end = candidate + 1; /* retain the newline for trimming */
+                }
+            }
+
+            char *double_newline = strstr(search_start, "\n\n");
+            if (double_newline && (!removal_end || double_newline < removal_end)) {
+                removal_end = double_newline + 2;
+            }
+
+            char *crlf_double = strstr(search_start, "\r\n\r\n");
+            if (crlf_double && (!removal_end || crlf_double < removal_end)) {
+                removal_end = crlf_double + 4;
+            }
+
+            if (removal_end) {
+                memmove(start, removal_end, strlen(removal_end) + 1);
+            } else {
+                *start = '\0';
+            }
+            break;
+        }
+    }
+}
+
+static void strip_leading_labels(char *text) {
+    static const char *const labels[] = {"answer:",      "final answer:", "response:",
+                                         "final:",       "reply:",        "output:",
+                                         "result:"};
+    char *start = NULL;
+
+    if (!text) {
+        return;
+    }
+
+    trim_leading_whitespace(text);
+    start = text;
+
+    for (size_t i = 0; i < (sizeof(labels) / sizeof(labels[0])); ++i) {
+        size_t label_len = strlen(labels[i]);
+        if (strncasecmp(start, labels[i], label_len) == 0) {
+            char *after = start + label_len;
+            while (*after && isspace((unsigned char)*after)) {
+                after++;
+            }
+            memmove(start, after, strlen(after) + 1);
+            break;
+        }
+    }
+}
+
+static void sanitize_model_response(char *response) {
+    if (!response) {
+        return;
+    }
+
+    remove_tagged_section(response, "<thinking>", "</thinking>");
+    remove_tagged_section(response, "<think>", "</think>");
+    remove_tagged_section(response, "<analysis>", "</analysis>");
+    remove_tagged_section(response, "<scratchpad>", "</scratchpad>");
+    remove_tagged_section(response, "[thinking]", "[/thinking]");
+    remove_tagged_section(response, "[think]", "[/think]");
+    remove_tagged_section(response, "{thinking}", "{/thinking}");
+    remove_tagged_section(response, "{think}", "{/think}");
+
+    trim_leading_whitespace(response);
+    remove_leading_metadata_block(response);
+    trim_leading_whitespace(response);
+    strip_leading_labels(response);
+    trim_leading_whitespace(response);
+    trim_trailing_whitespace(response);
 }
 
 static char *parse_ollama_response(const char *json_string) {
@@ -129,6 +294,7 @@ static char *get_ai_response(const char *full_prompt, const char *model_name, co
         CURLcode res = curl_easy_perform(curl);
         if (res == CURLE_OK) {
             response = parse_ollama_response(chunk.memory);
+            sanitize_model_response(response);
         } else {
             fprintf(stderr, "curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
         }
