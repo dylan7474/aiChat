@@ -39,6 +39,7 @@ struct MemoryStruct {
 struct Participant {
     char name[MAX_NAME_LENGTH];
     char model[MAX_MODEL_LENGTH];
+    char display_model[MAX_MODEL_LENGTH];
 };
 
 typedef int (*message_callback)(json_object *message, void *user_data);
@@ -619,6 +620,80 @@ static void handle_models_request(int client_fd, const char *ollama_url) {
     }
 }
 
+static const char *lookup_display_model(json_object *models_array, const char *identifier) {
+    size_t array_len = 0;
+
+    if (!models_array || !identifier || !*identifier) {
+        return NULL;
+    }
+
+    if (!json_object_is_type(models_array, json_type_array)) {
+        return NULL;
+    }
+
+    array_len = json_object_array_length(models_array);
+    for (size_t i = 0; i < array_len; ++i) {
+        json_object *item = json_object_array_get_idx(models_array, i);
+        const char *model_value = NULL;
+        const char *name_value = NULL;
+
+        if (!item || !json_object_is_type(item, json_type_object)) {
+            continue;
+        }
+
+        json_object *field = NULL;
+        if (json_object_object_get_ex(item, "model", &field) && field) {
+            model_value = json_object_get_string(field);
+        }
+        if (json_object_object_get_ex(item, "name", &field) && field) {
+            name_value = json_object_get_string(field);
+        }
+
+        if (model_value && strcmp(model_value, identifier) == 0) {
+            if (name_value && *name_value) {
+                return name_value;
+            }
+            return model_value;
+        }
+        if (name_value && strcmp(name_value, identifier) == 0) {
+            return name_value;
+        }
+    }
+
+    return NULL;
+}
+
+static void ensure_participant_display_models(struct Participant *participants, size_t participant_count,
+                                              json_object *models_payload) {
+    json_object *models_array = NULL;
+
+    if (!participants || participant_count == 0) {
+        return;
+    }
+
+    if (models_payload && json_object_is_type(models_payload, json_type_object)) {
+        json_object_object_get_ex(models_payload, "models", &models_array);
+    }
+
+    for (size_t i = 0; i < participant_count; ++i) {
+        trim_leading_whitespace(participants[i].display_model);
+        trim_trailing_whitespace(participants[i].display_model);
+        if (participants[i].display_model[0] != '\0') {
+            continue;
+        }
+
+        const char *display = lookup_display_model(models_array, participants[i].model);
+        if (!display || !*display) {
+            display = participants[i].model;
+        }
+
+        strncpy(participants[i].display_model, display, MAX_MODEL_LENGTH - 1);
+        participants[i].display_model[MAX_MODEL_LENGTH - 1] = '\0';
+        trim_leading_whitespace(participants[i].display_model);
+        trim_trailing_whitespace(participants[i].display_model);
+    }
+}
+
 static int run_conversation(const char *topic, int turns, struct Participant *participants,
                             size_t participant_count, const char *ollama_url, message_callback on_message,
                             void *callback_data, json_object **out_json, char **error_out) {
@@ -675,6 +750,10 @@ static int run_conversation(const char *topic, int turns, struct Participant *pa
         }
         json_object_object_add(participant_obj, "name", json_object_new_string(participants[p].name));
         json_object_object_add(participant_obj, "model", json_object_new_string(participants[p].model));
+        if (participants[p].display_model[0] != '\0') {
+            json_object_object_add(participant_obj, "displayModel",
+                                   json_object_new_string(participants[p].display_model));
+        }
         json_object_array_add(participants_json, participant_obj);
     }
 
@@ -727,6 +806,10 @@ static int run_conversation(const char *topic, int turns, struct Participant *pa
             json_object_object_add(message, "participantIndex", json_object_new_int((int)idx));
             json_object_object_add(message, "name", json_object_new_string(participants[idx].name));
             json_object_object_add(message, "model", json_object_new_string(participants[idx].model));
+            if (participants[idx].display_model[0] != '\0') {
+                json_object_object_add(message, "displayModel",
+                                       json_object_new_string(participants[idx].display_model));
+            }
             json_object_object_add(message, "text", json_object_new_string(response));
             json_object_array_add(messages, message);
 
@@ -1011,16 +1094,29 @@ static const char *get_html_page(void) {
            "        item.style.setProperty('--message-bg', paletteEntry.background);\n"
            "        item.style.setProperty('--message-border', paletteEntry.border);\n"
            "      }\n"
-           "      item.innerHTML = `<strong>${message.name} <span style=\"color:#64748b; font-weight:400;\">(${message.model})</span></strong>${message.text}`;\n"
+           "      const displayModel = (message.displayModel && typeof message.displayModel === 'string') ? message.displayModel : '';\n"
+           "      const canonicalModel = (message.model && typeof message.model === 'string') ? message.model : '';\n"
+           "      let modelLabel = displayModel;\n"
+           "      if (displayModel && canonicalModel && displayModel !== canonicalModel) {\n"
+           "        modelLabel = `${displayModel} (${canonicalModel})`;\n"
+           "      } else if (!modelLabel && canonicalModel) {\n"
+           "        modelLabel = canonicalModel;\n"
+           "      }\n"
+           "      const header = modelLabel\n"
+           "        ? `<strong>${message.name} <span style=\"color:#64748b; font-weight:400;\">(${modelLabel})</span></strong>`\n"
+           "        : `<strong>${message.name}</strong>`;\n"
+           "      item.innerHTML = `${header}${message.text}`;\n"
            "      messagesEl.appendChild(item);\n"
            "      transcriptEl.style.display = 'block';\n"
            "      transcriptEl.scrollTop = transcriptEl.scrollHeight;\n"
            "    }\n"
            "    function populateModelOptions(select, selectedModel) {\n"
            "      const datasetValue = (select.dataset.desiredModel || '').trim();\n"
+           "      const datasetDisplay = (select.dataset.displayModel || '').trim();\n"
            "      const providedValue = (selectedModel && typeof selectedModel === 'string') ? selectedModel.trim() : '';\n"
            "      const currentValue = (select.value && typeof select.value === 'string') ? select.value.trim() : '';\n"
            "      const requestedValue = providedValue || datasetValue || currentValue;\n"
+           "      const requestedDisplay = datasetDisplay || requestedValue;\n"
            "      select.innerHTML = '';\n"
            "      const placeholder = document.createElement('option');\n"
            "      placeholder.value = '';\n"
@@ -1030,15 +1126,21 @@ static const char *get_html_page(void) {
            "      placeholder.disabled = availableModels.length > 0;\n"
            "      select.appendChild(placeholder);\n"
            "      let hasMatch = false;\n"
+           "      let matchedDisplay = '';\n"
            "      availableModels.forEach((item) => {\n"
            "        const option = document.createElement('option');\n"
-           "        option.value = item.model;\n"
-           "        option.textContent = item.name && item.name !== item.model\n"
-           "          ? `${item.name} (${item.model})`\n"
-           "          : item.model;\n"
-           "        if (item.model === requestedValue) {\n"
+           "        const canonical = item && typeof item.model === 'string' ? item.model : '';\n"
+           "        const alias = item && typeof item.name === 'string' && item.name ? item.name : canonical;\n"
+           "        option.value = canonical;\n"
+           "        option.dataset.canonicalModel = canonical;\n"
+           "        option.dataset.displayModel = alias;\n"
+           "        option.textContent = alias && canonical && alias !== canonical\n"
+           "          ? `${alias} (${canonical})`\n"
+           "          : (alias || canonical || '');\n"
+           "        if ((canonical && canonical === requestedValue) || (!canonical && alias === requestedValue) || (!hasMatch && alias === requestedValue)) {\n"
            "          option.selected = true;\n"
            "          hasMatch = true;\n"
+           "          matchedDisplay = alias || canonical;\n"
            "        }\n"
            "        select.appendChild(option);\n"
            "      });\n"
@@ -1046,9 +1148,17 @@ static const char *get_html_page(void) {
            "        placeholder.selected = true;\n"
            "        if (requestedValue) {\n"
            "          select.dataset.desiredModel = requestedValue;\n"
+           "        } else {\n"
+           "          delete select.dataset.desiredModel;\n"
+           "        }\n"
+           "        if (requestedDisplay) {\n"
+           "          select.dataset.displayModel = requestedDisplay;\n"
+           "        } else {\n"
+           "          delete select.dataset.displayModel;\n"
            "        }\n"
            "      } else if (hasMatch) {\n"
            "        select.dataset.desiredModel = requestedValue;\n"
+           "        select.dataset.displayModel = matchedDisplay || requestedDisplay || requestedValue;\n"
            "      } else {\n"
            "        placeholder.selected = true;\n"
            "        if (requestedValue && !missingModelWarning) {\n"
@@ -1057,18 +1167,41 @@ static const char *get_html_page(void) {
            "            statusEl.textContent = 'A previously selected model is no longer available.';\n"
            "          }\n"
            "        }\n"
-           "        delete select.dataset.desiredModel;\n"
+           "        if (requestedValue) {\n"
+           "          select.dataset.desiredModel = requestedValue;\n"
+           "        } else {\n"
+           "          delete select.dataset.desiredModel;\n"
+           "        }\n"
+           "        if (requestedDisplay) {\n"
+           "          select.dataset.displayModel = requestedDisplay;\n"
+           "        } else {\n"
+           "          delete select.dataset.displayModel;\n"
+           "        }\n"
            "      }\n"
            "    }\n"
            "    function registerModelSelect(select, selectedModel) {\n"
            "      if (selectedModel) {\n"
            "        select.dataset.desiredModel = selectedModel;\n"
+           "        if (!select.dataset.displayModel) {\n"
+           "          select.dataset.displayModel = selectedModel;\n"
+           "        }\n"
+           "      } else {\n"
+           "        delete select.dataset.desiredModel;\n"
+           "        delete select.dataset.displayModel;\n"
            "      }\n"
            "      select.addEventListener('change', () => {\n"
            "        if (select.value) {\n"
            "          select.dataset.desiredModel = select.value;\n"
            "        } else {\n"
            "          delete select.dataset.desiredModel;\n"
+           "        }\n"
+           "        const currentOption = select.options[select.selectedIndex];\n"
+           "        if (currentOption && currentOption.dataset && currentOption.dataset.displayModel) {\n"
+           "          select.dataset.displayModel = currentOption.dataset.displayModel;\n"
+           "        } else if (select.value) {\n"
+           "          select.dataset.displayModel = select.value;\n"
+           "        } else {\n"
+           "          delete select.dataset.displayModel;\n"
            "        }\n"
            "        if (statusEl.textContent === 'A previously selected model is no longer available.') {\n"
            "          statusEl.textContent = '';\n"
@@ -1145,9 +1278,26 @@ static const char *get_html_page(void) {
            "      const participants = [];\n"
            "      participantDivs.forEach((div, index) => {\n"
            "        const name = div.querySelector('input[name=\"name\"]').value.trim();\n"
-           "        const modelValue = div.querySelector('select[name=\"model\"]').value.trim();\n"
-           "        if (modelValue) {\n"
-           "          participants.push({ name: name || `Companion ${index + 1}`, model: modelValue });\n"
+           "        const selectEl = div.querySelector('select[name=\"model\"]');\n"
+           "        const rawValue = (selectEl && typeof selectEl.value === 'string') ? selectEl.value.trim() : '';\n"
+           "        const selectedOption = selectEl ? selectEl.options[selectEl.selectedIndex] : null;\n"
+           "        const optionDisplay = (selectedOption && selectedOption.dataset && typeof selectedOption.dataset.displayModel === 'string')\n"
+           "          ? selectedOption.dataset.displayModel.trim()\n"
+           "          : '';\n"
+           "        const optionCanonical = (selectedOption && selectedOption.dataset && typeof selectedOption.dataset.canonicalModel === 'string')\n"
+           "          ? selectedOption.dataset.canonicalModel.trim()\n"
+           "          : '';\n"
+           "        const datasetDisplay = (selectEl && selectEl.dataset && typeof selectEl.dataset.displayModel === 'string')\n"
+           "          ? selectEl.dataset.displayModel.trim()\n"
+           "          : '';\n"
+           "        const canonicalValue = optionCanonical || rawValue;\n"
+           "        const displayValue = optionDisplay || datasetDisplay || canonicalValue;\n"
+           "        if (canonicalValue) {\n"
+           "          participants.push({\n"
+           "            name: name || `Companion ${index + 1}`,\n"
+           "            model: canonicalValue,\n"
+           "            displayModel: displayValue\n"
+           "          });\n"
            "        }\n"
            "      });\n"
            "      if (!topic) {\n"
@@ -1337,6 +1487,7 @@ static void handle_chat_request(int client_fd, const char *body, size_t body_len
     json_object *result = NULL;
     char *error_message = NULL;
 
+    memset(participants, 0, sizeof(participants));
     struct json_tokener *tok = json_tokener_new();
     if (!tok) {
         send_http_error(client_fd, "500 Internal Server Error", "Unable to initialise JSON parser.");
@@ -1393,8 +1544,10 @@ static void handle_chat_request(int client_fd, const char *body, size_t body_len
         json_object *item = json_object_array_get_idx(participants_obj, i);
         json_object *name_obj = NULL;
         json_object *model_obj = NULL;
+        json_object *display_obj = NULL;
         const char *name = NULL;
         const char *model = NULL;
+        const char *display = NULL;
 
         if (!item || json_object_get_type(item) != json_type_object) {
             continue;
@@ -1406,6 +1559,11 @@ static void handle_chat_request(int client_fd, const char *body, size_t body_len
         }
         if (!model || !*model) {
             continue;
+        }
+
+        if (json_object_object_get_ex(item, "displayModel", &display_obj) &&
+            json_object_get_type(display_obj) == json_type_string && json_object_get_string_len(display_obj) > 0) {
+            display = json_object_get_string(display_obj);
         }
 
         if (json_object_object_get_ex(item, "name", &name_obj) &&
@@ -1424,10 +1582,31 @@ static void handle_chat_request(int client_fd, const char *body, size_t body_len
         participants[participant_count].name[MAX_NAME_LENGTH - 1] = '\0';
         strncpy(participants[participant_count].model, model, MAX_MODEL_LENGTH - 1);
         participants[participant_count].model[MAX_MODEL_LENGTH - 1] = '\0';
+        if (display && *display) {
+            strncpy(participants[participant_count].display_model, display, MAX_MODEL_LENGTH - 1);
+            participants[participant_count].display_model[MAX_MODEL_LENGTH - 1] = '\0';
+        }
         participant_count++;
     }
 
     json_object_put(payload);
+
+    int needs_lookup = 0;
+    for (size_t i = 0; i < participant_count; ++i) {
+        if (participants[i].display_model[0] == '\0') {
+            needs_lookup = 1;
+            break;
+        }
+    }
+
+    json_object *models_payload = NULL;
+    if (needs_lookup && fetch_available_models(ollama_url, &models_payload, NULL) != 0) {
+        models_payload = NULL;
+    }
+    ensure_participant_display_models(participants, participant_count, models_payload);
+    if (models_payload) {
+        json_object_put(models_payload);
+    }
 
     if (participant_count == 0) {
         send_http_error(client_fd, "400 Bad Request", "No valid participants supplied.");
@@ -1463,6 +1642,10 @@ static void handle_chat_request(int client_fd, const char *body, size_t body_len
         }
         json_object_object_add(participant_obj, "name", json_object_new_string(participants[i].name));
         json_object_object_add(participant_obj, "model", json_object_new_string(participants[i].model));
+        if (participants[i].display_model[0] != '\0') {
+            json_object_object_add(participant_obj, "displayModel",
+                                   json_object_new_string(participants[i].display_model));
+        }
         json_object_array_add(start_participants, participant_obj);
     }
 
