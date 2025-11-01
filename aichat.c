@@ -39,6 +39,9 @@ struct Participant {
     char model[MAX_MODEL_LENGTH];
 };
 
+static void send_http_response(int client_fd, const char *status, const char *content_type, const char *body);
+static void send_http_error(int client_fd, const char *status, const char *message);
+
 static const char *get_ollama_url(void) {
     const char *env = getenv("OLLAMA_URL");
     if (env && *env) {
@@ -147,6 +150,216 @@ static char *append_to_history(char *history, const char *text) {
     }
     memcpy(new_history + old_len, text, text_len + 1);
     return new_history;
+}
+
+static char *build_models_url(const char *ollama_url) {
+    const char *suffix = "/tags";
+    const char *generate = "generate";
+    size_t url_len = strlen(ollama_url);
+    size_t generate_len = strlen(generate);
+    char *result = NULL;
+
+    if (url_len >= generate_len && strcmp(ollama_url + url_len - generate_len, generate) == 0) {
+        size_t base_len = url_len - generate_len;
+        result = malloc(base_len + strlen(suffix) + 1);
+        if (!result) {
+            return NULL;
+        }
+        memcpy(result, ollama_url, base_len);
+        if (base_len > 0 && result[base_len - 1] == '/') {
+            strcpy(result + base_len, suffix + 1);
+        } else {
+            strcpy(result + base_len, suffix);
+        }
+        return result;
+    }
+
+    int needs_slash = (url_len == 0 || ollama_url[url_len - 1] != '/');
+    result = malloc(url_len + needs_slash + strlen(suffix) + 1);
+    if (!result) {
+        return NULL;
+    }
+    strcpy(result, ollama_url);
+    if (needs_slash) {
+        strcat(result, "/");
+    }
+    strcat(result, suffix + 1); /* suffix starts with '/', avoid duplicating */
+    return result;
+}
+
+static int fetch_available_models(const char *ollama_url, json_object **out_json, char **error_out) {
+    struct MemoryStruct chunk = {.memory = NULL, .size = 0};
+    CURL *curl = NULL;
+    CURLcode res = CURLE_OK;
+    char *models_url = NULL;
+    json_object *parsed = NULL;
+    json_object *models_array = NULL;
+    json_object *result = NULL;
+    json_object *list = NULL;
+
+    *out_json = NULL;
+    if (error_out) {
+        *error_out = NULL;
+    }
+
+    models_url = build_models_url(ollama_url);
+    if (!models_url) {
+        if (error_out) {
+            *error_out = strdup("Failed to prepare Ollama models URL.");
+        }
+        return -1;
+    }
+
+    chunk.memory = malloc(1);
+    if (!chunk.memory) {
+        free(models_url);
+        if (error_out) {
+            *error_out = strdup("Failed to allocate response buffer.");
+        }
+        return -1;
+    }
+    chunk.size = 0;
+
+    curl_global_init(CURL_GLOBAL_ALL);
+    curl = curl_easy_init();
+    if (!curl) {
+        free(models_url);
+        free(chunk.memory);
+        if (error_out) {
+            *error_out = strdup("Unable to initialise CURL.");
+        }
+        curl_global_cleanup();
+        return -1;
+    }
+
+    curl_easy_setopt(curl, CURLOPT_URL, models_url);
+    curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteMemoryCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&chunk);
+
+    res = curl_easy_perform(curl);
+    free(models_url);
+    curl_easy_cleanup(curl);
+    curl_global_cleanup();
+
+    if (res != CURLE_OK) {
+        free(chunk.memory);
+        if (error_out) {
+            *error_out = strdup("Failed to contact Ollama for model list.");
+        }
+        return -1;
+    }
+
+    parsed = json_tokener_parse(chunk.memory);
+    if (parsed && json_object_is_type(parsed, json_type_object)) {
+        json_object_object_get_ex(parsed, "models", &models_array);
+    } else if (parsed && json_object_is_type(parsed, json_type_array)) {
+        models_array = parsed;
+    }
+
+    if (!models_array || !json_object_is_type(models_array, json_type_array)) {
+        free(chunk.memory);
+        if (parsed) {
+            json_object_put(parsed);
+        }
+        if (error_out) {
+            *error_out = strdup("Unexpected response from Ollama while listing models.");
+        }
+        return -1;
+    }
+
+    list = json_object_new_array();
+    if (!list) {
+        free(chunk.memory);
+        json_object_put(parsed);
+        if (error_out) {
+            *error_out = strdup("Failed to allocate models array.");
+        }
+        return -1;
+    }
+
+    size_t array_len = json_object_array_length(models_array);
+    for (size_t i = 0; i < array_len; ++i) {
+        json_object *item = json_object_array_get_idx(models_array, i);
+        const char *model_value = NULL;
+        const char *name_value = NULL;
+
+        if (!item) {
+            continue;
+        }
+
+        if (json_object_is_type(item, json_type_object)) {
+            json_object *field = NULL;
+            if (json_object_object_get_ex(item, "model", &field) && field) {
+                model_value = json_object_get_string(field);
+            }
+            if (json_object_object_get_ex(item, "name", &field) && field) {
+                name_value = json_object_get_string(field);
+            }
+        } else if (json_object_is_type(item, json_type_string)) {
+            model_value = json_object_get_string(item);
+        }
+
+        if (!model_value || !*model_value) {
+            if (name_value && *name_value) {
+                model_value = name_value;
+            } else {
+                continue;
+            }
+        }
+
+        json_object *entry = json_object_new_object();
+        if (!entry) {
+            json_object_put(list);
+            json_object_put(parsed);
+            free(chunk.memory);
+            if (error_out) {
+                *error_out = strdup("Failed to allocate model entry.");
+            }
+            return -1;
+        }
+
+        const char *display = (name_value && *name_value) ? name_value : model_value;
+        json_object_object_add(entry, "name", json_object_new_string(display));
+        json_object_object_add(entry, "model", json_object_new_string(model_value));
+        json_object_array_add(list, entry);
+    }
+
+    result = json_object_new_object();
+    if (!result) {
+        json_object_put(list);
+        json_object_put(parsed);
+        free(chunk.memory);
+        if (error_out) {
+            *error_out = strdup("Failed to prepare models payload.");
+        }
+        return -1;
+    }
+
+    json_object_object_add(result, "models", list);
+    *out_json = result;
+
+    json_object_put(parsed);
+    free(chunk.memory);
+    return 0;
+}
+
+static void handle_models_request(int client_fd, const char *ollama_url) {
+    json_object *payload = NULL;
+    char *error_message = NULL;
+
+    if (fetch_available_models(ollama_url, &payload, &error_message) == 0 && payload) {
+        const char *json_payload = json_object_to_json_string_ext(payload, JSON_C_TO_STRING_PLAIN);
+        send_http_response(client_fd, "200 OK", "application/json", json_payload);
+        json_object_put(payload);
+    } else {
+        const char *message = error_message ? error_message : "Unable to retrieve model list.";
+        send_http_error(client_fd, "502 Bad Gateway", message);
+    }
+
+    if (error_message) {
+        free(error_message);
+    }
 }
 
 static int run_conversation(const char *topic, int turns, struct Participant *participants,
@@ -379,6 +592,80 @@ static const char *get_html_page(void) {
            "    const statusEl = document.getElementById('status');\n"
            "    const messagesEl = document.getElementById('messages');\n"
            "    const transcriptEl = document.getElementById('transcript');\n"
+           "    let availableModels = [];\n"
+           "    const modelSelects = new Set();\n"
+           "    let modelLoadError = false;\n"
+           "    function populateModelOptions(select, selectedModel) {\n"
+           "      const previousValue = selectedModel || select.value || '';\n"
+           "      select.innerHTML = '';\n"
+           "      const placeholder = document.createElement('option');\n"
+           "      placeholder.value = '';\n"
+           "      placeholder.textContent = modelLoadError\n"
+           "        ? 'Unable to load models'\n"
+           "        : (availableModels.length ? 'Select a model' : 'Loading models...');\n"
+           "      if (availableModels.length === 0 && !modelLoadError) {\n"
+           "        placeholder.selected = true;\n"
+           "      } else {\n"
+           "        placeholder.disabled = true;\n"
+           "        if (!previousValue) {\n"
+           "          placeholder.selected = true;\n"
+           "        }\n"
+           "      }\n"
+           "      select.appendChild(placeholder);\n"
+           "      let hasMatch = false;\n"
+           "      availableModels.forEach((item) => {\n"
+           "        const option = document.createElement('option');\n"
+           "        option.value = item.model;\n"
+           "        option.textContent = item.name && item.name !== item.model\n"
+           "          ? `${item.name} (${item.model})`\n"
+           "          : item.model;\n"
+           "        if (item.model === previousValue) {\n"
+           "          option.selected = true;\n"
+           "          hasMatch = true;\n"
+           "        }\n"
+           "        select.appendChild(option);\n"
+           "      });\n"
+           "      if (previousValue && !hasMatch) {\n"
+           "        const customOption = document.createElement('option');\n"
+           "        customOption.value = previousValue;\n"
+           "        customOption.textContent = previousValue;\n"
+           "        customOption.selected = true;\n"
+           "        select.appendChild(customOption);\n"
+           "      }\n"
+           "    }\n"
+           "    function registerModelSelect(select, selectedModel) {\n"
+           "      modelSelects.add(select);\n"
+           "      populateModelOptions(select, selectedModel);\n"
+           "    }\n"
+           "    function unregisterModelSelect(select) {\n"
+           "      modelSelects.delete(select);\n"
+           "    }\n"
+           "    function refreshModelSelects() {\n"
+           "      modelSelects.forEach((select) => {\n"
+           "        populateModelOptions(select, select.value);\n"
+           "      });\n"
+           "    }\n"
+           "    async function loadModels() {\n"
+           "      try {\n"
+           "        const response = await fetch('/models');\n"
+           "        if (!response.ok) {\n"
+           "          throw new Error('Request failed');\n"
+           "        }\n"
+           "        const payload = await response.json();\n"
+           "        availableModels = Array.isArray(payload.models) ? payload.models : [];\n"
+           "        modelLoadError = false;\n"
+           "        if (availableModels.length && statusEl.textContent === 'Unable to load models from Ollama.') {\n"
+           "          statusEl.textContent = '';\n"
+           "        }\n"
+           "      } catch (error) {\n"
+           "        availableModels = [];\n"
+           "        modelLoadError = true;\n"
+           "        if (!statusEl.textContent) {\n"
+           "          statusEl.textContent = 'Unable to load models from Ollama.';\n"
+           "        }\n"
+           "      }\n"
+           "      refreshModelSelects();\n"
+           "    }\n"
            "    function createParticipant(name, model) {\n"
            "      const wrapper = document.createElement('div');\n"
            "      wrapper.className = 'participant';\n"
@@ -386,10 +673,13 @@ static const char *get_html_page(void) {
            "        <label>Friendly name</label>\n"
            "        <input name=\"name\" placeholder=\"Astra\" value=\"${name || ''}\" />\n"
            "        <label>Ollama model</label>\n"
-           "        <input name=\"model\" placeholder=\"llama3:8b\" value=\"${model || ''}\" />\n"
+           "        <select name=\"model\"></select>\n"
            "        <button type=\"button\" class=\"remove\">Remove</button>\n"
            "      `;\n"
+           "      const select = wrapper.querySelector('select[name=\"model\"]');\n"
+           "      registerModelSelect(select, model || '');\n"
            "      wrapper.querySelector('.remove').addEventListener('click', () => {\n"
+           "        unregisterModelSelect(select);\n"
            "        participantsEl.removeChild(wrapper);\n"
            "      });\n"
            "      participantsEl.appendChild(wrapper);\n"
@@ -409,9 +699,9 @@ static const char *get_html_page(void) {
            "      const participants = [];\n"
            "      participantDivs.forEach((div, index) => {\n"
            "        const name = div.querySelector('input[name=\"name\"]').value.trim();\n"
-           "        const model = div.querySelector('input[name=\"model\"]').value.trim();\n"
-           "        if (model) {\n"
-           "          participants.push({ name: name || `Companion ${index + 1}`, model });\n"
+           "        const modelValue = div.querySelector('select[name=\"model\"]').value.trim();\n"
+           "        if (modelValue) {\n"
+           "          participants.push({ name: name || `Companion ${index + 1}`, model: modelValue });\n"
            "        }\n"
            "      });\n"
            "      if (!topic) {\n"
@@ -423,7 +713,7 @@ static const char *get_html_page(void) {
            "        return;\n"
            "      }\n"
            "      if (participants.length === 0) {\n"
-           "        statusEl.textContent = 'Add at least one participant with a model name.';\n"
+           "        statusEl.textContent = 'Add at least one participant with a model selected.';\n"
            "        return;\n"
            "      }\n"
            "      statusEl.textContent = 'Running conversation...';\n"
@@ -452,6 +742,7 @@ static const char *get_html_page(void) {
            "    });\n"
            "    createParticipant('Astra', 'gemma:2b');\n"
            "    createParticipant('Nova', 'llama3:8b');\n"
+           "    loadModels();\n"
            "  </script>\n"
            "</body>\n"
            "</html>\n";
@@ -671,6 +962,8 @@ static void handle_client(int client_fd, const char *ollama_url) {
 
     if (strcmp(method, "GET") == 0 && strcmp(path, "/") == 0) {
         send_http_response(client_fd, "200 OK", "text/html; charset=UTF-8", get_html_page());
+    } else if (strcmp(method, "GET") == 0 && strcmp(path, "/models") == 0) {
+        handle_models_request(client_fd, ollama_url);
     } else if (strcmp(method, "POST") == 0 && strcmp(path, "/chat") == 0) {
         if (!body) {
             send_http_error(client_fd, "400 Bad Request", "Missing request body.");
