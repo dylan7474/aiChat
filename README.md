@@ -9,6 +9,16 @@ HTTP API, and printing the exchange with simple visual cues so you can observe h
 Before building, run the provided `./configure` script to verify that the required toolchain and libraries are available. The
 script will point you toward installation commands if anything is missing.
 
+On Debian/Ubuntu systems you can install all required build dependencies with:
+
+```
+sudo apt-get update
+sudo apt-get install -y \
+  build-essential make gcc pkg-config \
+  libsdl2-dev libsdl2-image-dev libsdl2-mixer-dev libsdl2-ttf-dev \
+  libjson-c-dev
+```
+
 ### Linux (GNU Make)
 1. `./configure`
 2. `make`
