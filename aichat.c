@@ -293,9 +293,41 @@ static void strip_leading_name_label(char *text, const char *name) {
     }
 }
 
-static void sanitize_model_response(char *response, const char *participant_name) {
+static void sanitize_model_response(char *response, const char *participant_name,
+                                    const char *display_label, const char *model_name) {
+    const char *labels[3];
+    size_t label_count = 0;
+
     if (!response) {
         return;
+    }
+
+    if (participant_name && *participant_name) {
+        labels[label_count++] = participant_name;
+    }
+    if (display_label && *display_label) {
+        int already_present = 0;
+        for (size_t i = 0; i < label_count; ++i) {
+            if (strcasecmp(labels[i], display_label) == 0) {
+                already_present = 1;
+                break;
+            }
+        }
+        if (!already_present) {
+            labels[label_count++] = display_label;
+        }
+    }
+    if (model_name && *model_name) {
+        int already_present = 0;
+        for (size_t i = 0; i < label_count; ++i) {
+            if (strcasecmp(labels[i], model_name) == 0) {
+                already_present = 1;
+                break;
+            }
+        }
+        if (!already_present) {
+            labels[label_count++] = model_name;
+        }
     }
 
     remove_tagged_section(response, "<thinking>", "</thinking>");
@@ -308,13 +340,14 @@ static void sanitize_model_response(char *response, const char *participant_name
     remove_tagged_section(response, "{think}", "{/think}");
 
     trim_leading_whitespace(response);
-    if (participant_name && *participant_name) {
-        drop_text_before_name_label(response, participant_name);
+    for (size_t i = 0; i < label_count; ++i) {
+        drop_text_before_name_label(response, labels[i]);
     }
     remove_leading_metadata_block(response);
     trim_leading_whitespace(response);
-    if (participant_name && *participant_name) {
-        strip_leading_name_label(response, participant_name);
+    for (size_t i = 0; i < label_count; ++i) {
+        strip_leading_name_label(response, labels[i]);
+        trim_leading_whitespace(response);
     }
     strip_leading_labels(response);
     trim_leading_whitespace(response);
@@ -350,7 +383,8 @@ static char *parse_ollama_response(const char *json_string) {
 }
 
 static char *get_ai_response(const char *full_prompt, const char *model_name,
-                             const char *participant_name, const char *ollama_url) {
+                             const char *participant_name, const char *display_label,
+                             const char *ollama_url) {
     CURL *curl = NULL;
     char *response = NULL;
     struct MemoryStruct chunk = {.memory = malloc(1), .size = 0};
@@ -383,7 +417,7 @@ static char *get_ai_response(const char *full_prompt, const char *model_name,
         CURLcode res = curl_easy_perform(curl);
         if (res == CURLE_OK) {
             response = parse_ollama_response(chunk.memory);
-            sanitize_model_response(response, participant_name);
+            sanitize_model_response(response, participant_name, display_label, model_name);
         } else {
             fprintf(stderr, "curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
         }
@@ -773,7 +807,8 @@ static int run_conversation(const char *topic, int turns, struct Participant *pa
             }
 
             response = get_ai_response(conversation_history, participants[idx].model,
-                                       participants[idx].name, ollama_url);
+                                       participants[idx].name, participants[idx].display_model,
+                                       ollama_url);
             if (!response) {
                 if (error_out) {
                     char buffer[256];
