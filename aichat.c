@@ -39,6 +39,8 @@ struct Participant {
     char model[MAX_MODEL_LENGTH];
 };
 
+typedef int (*message_callback)(json_object *message, void *user_data);
+
 static void send_http_response(int client_fd, const char *status, const char *content_type, const char *body);
 static void send_http_error(int client_fd, const char *status, const char *message);
 
@@ -363,8 +365,8 @@ static void handle_models_request(int client_fd, const char *ollama_url) {
 }
 
 static int run_conversation(const char *topic, int turns, struct Participant *participants,
-                            size_t participant_count, const char *ollama_url, json_object **out_json,
-                            char **error_out) {
+                            size_t participant_count, const char *ollama_url, message_callback on_message,
+                            void *callback_data, json_object **out_json, char **error_out) {
     char *conversation_history = NULL;
     json_object *messages = NULL;
     json_object *participants_json = NULL;
@@ -472,6 +474,19 @@ static int run_conversation(const char *topic, int turns, struct Participant *pa
             json_object_object_add(message, "text", json_object_new_string(response));
             json_object_array_add(messages, message);
 
+            if (on_message) {
+                json_object_get(message);
+                if (on_message(message, callback_data) != 0) {
+                    json_object_put(message);
+                    free(response);
+                    if (error_out && (!*error_out)) {
+                        *error_out = strdup("Failed to stream message.");
+                    }
+                    goto fail;
+                }
+                json_object_put(message);
+            }
+
             free(response);
         }
     }
@@ -544,6 +559,126 @@ static void send_http_error(int client_fd, const char *status, const char *messa
     json_object_put(obj);
 }
 
+static int send_all(int client_fd, const char *data, size_t length) {
+    size_t total_sent = 0;
+
+    while (total_sent < length) {
+        ssize_t written = send(client_fd, data + total_sent, length - total_sent, 0);
+        if (written <= 0) {
+            return -1;
+        }
+        total_sent += (size_t)written;
+    }
+
+    return 0;
+}
+
+static int send_chunked_header(int client_fd, const char *status, const char *content_type) {
+    char header[512];
+    int header_len = snprintf(header, sizeof(header),
+                              "HTTP/1.1 %s\r\n"
+                              "Content-Type: %s\r\n"
+                              "Transfer-Encoding: chunked\r\n"
+                              "Cache-Control: no-cache\r\n"
+                              "Access-Control-Allow-Origin: *\r\n"
+                              "Connection: close\r\n\r\n",
+                              status, content_type);
+
+    if (header_len < 0 || (size_t)header_len >= sizeof(header)) {
+        return -1;
+    }
+
+    return send_all(client_fd, header, (size_t)header_len);
+}
+
+static int send_json_chunk(int client_fd, json_object *obj) {
+    const char *json = json_object_to_json_string_ext(obj, JSON_C_TO_STRING_PLAIN);
+    char size_buffer[32];
+    int size_len = 0;
+    size_t json_len = 0;
+
+    if (!json) {
+        return -1;
+    }
+
+    json_len = strlen(json);
+    size_len = snprintf(size_buffer, sizeof(size_buffer), "%zx\r\n", json_len + 1);
+    if (size_len < 0 || (size_t)size_len >= sizeof(size_buffer)) {
+        return -1;
+    }
+
+    if (send_all(client_fd, size_buffer, (size_t)size_len) != 0) {
+        return -1;
+    }
+
+    if (send_all(client_fd, json, json_len) != 0) {
+        return -1;
+    }
+
+    if (send_all(client_fd, "\n", 1) != 0) {
+        return -1;
+    }
+
+    if (send_all(client_fd, "\r\n", 2) != 0) {
+        return -1;
+    }
+
+    return 0;
+}
+
+static int finish_chunked_response(int client_fd) {
+    return send_all(client_fd, "0\r\n\r\n", 5);
+}
+
+static int send_stream_error_event(int client_fd, const char *message) {
+    json_object *event = json_object_new_object();
+    int result = -1;
+
+    if (!event) {
+        return -1;
+    }
+
+    json_object_object_add(event, "type", json_object_new_string("error"));
+    json_object_object_add(event, "message",
+                           json_object_new_string(message ? message : "Conversation failed."));
+
+    result = send_json_chunk(client_fd, event);
+    json_object_put(event);
+    return result;
+}
+
+struct StreamContext {
+    int client_fd;
+    int failed;
+};
+
+static int stream_message_callback(json_object *message, void *user_data) {
+    struct StreamContext *ctx = (struct StreamContext *)user_data;
+    json_object *event = NULL;
+    int rc = -1;
+
+    if (!ctx || ctx->failed) {
+        return -1;
+    }
+
+    event = json_object_new_object();
+    if (!event) {
+        ctx->failed = 1;
+        return -1;
+    }
+
+    json_object_object_add(event, "type", json_object_new_string("message"));
+    json_object_object_add(event, "message", json_object_get(message));
+
+    rc = send_json_chunk(ctx->client_fd, event);
+    if (rc != 0) {
+        ctx->failed = 1;
+    }
+
+    json_object_put(event);
+    return rc;
+}
+
 static const char *get_html_page(void) {
     return "<!DOCTYPE html>\n"
            "<html lang=\"en\">\n"
@@ -562,8 +697,7 @@ static const char *get_html_page(void) {
            "    .participants { margin-top: 1rem; }\n"
            "    .participant { border: 1px solid #e4e7eb; padding: 1rem; border-radius: 10px; margin-bottom: 1rem; background: #f9fafb; }\n"
            "    .log { margin-top: 2rem; white-space: pre-wrap; background: white; padding: 1rem; border-radius: 12px; box-shadow: 0 4px 12px rgba(15, 23, 42, 0.08); }\n"
-           "    .message { padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 0.75rem; background: #eff6ff; border-left: 4px solid #3b82f6; }\n"
-           "    .message:nth-child(even) { background: #ecfdf5; border-left-color: #10b981; }\n"
+           "    .message { padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 0.75rem; background: var(--message-bg, #eff6ff); border-left: 4px solid var(--message-border, #3b82f6); box-shadow: 0 2px 6px rgba(15, 23, 42, 0.08); transition: background-color 0.2s ease; }\n"
            "    .message strong { display: block; margin-bottom: 0.25rem; }\n"
            "    .actions { display: flex; gap: 0.75rem; flex-wrap: wrap; }\n"
            "  </style>\n"
@@ -595,6 +729,36 @@ static const char *get_html_page(void) {
            "    let availableModels = [];\n"
            "    const modelSelects = new Set();\n"
            "    let modelLoadError = false;\n"
+           "    const colorPalette = [\n"
+           "      { background: '#eff6ff', border: '#3b82f6' },\n"
+           "      { background: '#ecfdf5', border: '#10b981' },\n"
+           "      { background: '#fdf2f8', border: '#db2777' },\n"
+           "      { background: '#fef3c7', border: '#f59e0b' },\n"
+           "      { background: '#ede9fe', border: '#7c3aed' },\n"
+           "      { background: '#e0f2fe', border: '#0ea5e9' }\n"
+           "    ];\n"
+           "    const participantStyles = new Map();\n"
+           "    function assignParticipantStyles(participants) {\n"
+           "      participantStyles.clear();\n"
+           "      participants.forEach((participant, index) => {\n"
+           "        const paletteEntry = colorPalette[index % colorPalette.length];\n"
+           "        participantStyles.set(index, paletteEntry);\n"
+           "      });\n"
+           "    }\n"
+           "    function appendMessage(message) {\n"
+           "      const item = document.createElement('div');\n"
+           "      item.className = 'message';\n"
+           "      const paletteEntry = participantStyles.get(message.participantIndex) ||\n"
+           "        colorPalette[(message.participantIndex || 0) % colorPalette.length];\n"
+           "      if (paletteEntry) {\n"
+           "        item.style.setProperty('--message-bg', paletteEntry.background);\n"
+           "        item.style.setProperty('--message-border', paletteEntry.border);\n"
+           "      }\n"
+           "      item.innerHTML = `<strong>${message.name} <span style=\"color:#64748b; font-weight:400;\">(${message.model})</span></strong>${message.text}`;\n"
+           "      messagesEl.appendChild(item);\n"
+           "      transcriptEl.style.display = 'block';\n"
+           "      transcriptEl.scrollTop = transcriptEl.scrollHeight;\n"
+           "    }\n"
            "    function populateModelOptions(select, selectedModel) {\n"
            "      const previousValue = selectedModel || select.value || '';\n"
            "      select.innerHTML = '';\n"
@@ -692,6 +856,7 @@ static const char *get_html_page(void) {
            "      event.preventDefault();\n"
            "      statusEl.textContent = '';\n"
            "      messagesEl.innerHTML = '';\n"
+           "      participantStyles.clear();\n"
            "      transcriptEl.style.display = 'none';\n"
            "      const topic = document.getElementById('topic').value.trim();\n"
            "      const turns = parseInt(document.getElementById('turns').value, 10);\n"
@@ -716,26 +881,90 @@ static const char *get_html_page(void) {
            "        statusEl.textContent = 'Add at least one participant with a model selected.';\n"
            "        return;\n"
            "      }\n"
-           "      statusEl.textContent = 'Running conversation...';\n"
+           "      statusEl.textContent = 'Starting conversation...';\n"
            "      try {\n"
            "        const response = await fetch('/chat', {\n"
            "          method: 'POST',\n"
            "          headers: { 'Content-Type': 'application/json' },\n"
            "          body: JSON.stringify({ topic, turns, participants })\n"
            "        });\n"
-           "        const payload = await response.json();\n"
            "        if (!response.ok) {\n"
-           "          statusEl.textContent = payload.error || 'The conversation failed.';\n"
+           "          let payload = null;\n"
+           "          try {\n"
+           "            payload = await response.json();\n"
+           "          } catch (parseError) {\n"
+           "            // ignore JSON parse errors\n"
+           "          }\n"
+           "          statusEl.textContent = (payload && payload.error) ? payload.error : 'The conversation failed.';\n"
            "          return;\n"
            "        }\n"
-           "        statusEl.textContent = '';\n"
+           "        const reader = response.body && response.body.getReader ? response.body.getReader() : null;\n"
+           "        if (!reader) {\n"
+           "          statusEl.textContent = 'Streaming is not supported by this browser.';\n"
+           "          return;\n"
+           "        }\n"
+           "        statusEl.textContent = 'Waiting for responses...';\n"
            "        transcriptEl.style.display = 'block';\n"
-           "        payload.messages.forEach((message) => {\n"
-           "          const item = document.createElement('div');\n"
-           "          item.className = 'message';\n"
-           "          item.innerHTML = `<strong>${message.name} <span style=\"color:#64748b; font-weight:400;\">(${message.model})</span></strong>${message.text}`;\n"
-           "          messagesEl.appendChild(item);\n"
-           "        });\n"
+           "        const decoder = new TextDecoder();\n"
+           "        let buffer = '';\n"
+           "        let stopStreaming = false;\n"
+           "        while (!stopStreaming) {\n"
+           "          const { value, done } = await reader.read();\n"
+           "          if (done) {\n"
+           "            break;\n"
+           "          }\n"
+           "          buffer += decoder.decode(value, { stream: true });\n"
+           "          const lines = buffer.split('\\n');\n"
+           "          buffer = lines.pop();\n"
+           "          for (const line of lines) {\n"
+           "            const trimmed = line.trim();\n"
+           "            if (!trimmed) {\n"
+           "              continue;\n"
+           "            }\n"
+           "            let eventPayload;\n"
+           "            try {\n"
+           "              eventPayload = JSON.parse(trimmed);\n"
+           "            } catch (parseError) {\n"
+           "              continue;\n"
+           "            }\n"
+           "            if (eventPayload.type === 'start') {\n"
+           "              const participantsList = Array.isArray(eventPayload.participants) ? eventPayload.participants : [];\n"
+           "              assignParticipantStyles(participantsList);\n"
+           "              statusEl.textContent = 'Conversation in progress...';\n"
+           "            } else if (eventPayload.type === 'message' && eventPayload.message) {\n"
+           "              appendMessage(eventPayload.message);\n"
+           "              statusEl.textContent = `Responding: ${eventPayload.message.name}`;\n"
+           "            } else if (eventPayload.type === 'error') {\n"
+           "              statusEl.textContent = eventPayload.message || 'The conversation failed.';\n"
+           "              stopStreaming = true;\n"
+           "              break;\n"
+           "            } else if (eventPayload.type === 'complete') {\n"
+           "              statusEl.textContent = 'Conversation complete.';\n"
+           "              stopStreaming = true;\n"
+           "              break;\n"
+           "            }\n"
+           "          }\n"
+           "          if (stopStreaming) {\n"
+           "            await reader.cancel().catch(() => {});\n"
+           "            break;\n"
+           "          }\n"
+           "        }\n"
+           "        if (!stopStreaming) {\n"
+           "          buffer += decoder.decode();\n"
+           "          const trimmed = buffer.trim();\n"
+           "          if (trimmed) {\n"
+           "            try {\n"
+           "              const eventPayload = JSON.parse(trimmed);\n"
+           "              if (eventPayload.type === 'error') {\n"
+           "                statusEl.textContent = eventPayload.message || 'The conversation failed.';\n"
+           "              } else if (eventPayload.type === 'complete') {\n"
+           "                statusEl.textContent = 'Conversation complete.';\n"
+           "              }\n"
+           "            } catch (parseError) {\n"
+           "              // ignore trailing parse issues\n"
+           "            }\n"
+           "          }\n"
+           "        }\n"
            "      } catch (error) {\n"
            "        statusEl.textContent = 'Unable to reach the aiChat server.';\n"
            "      }\n"
@@ -924,19 +1153,93 @@ static void handle_chat_request(int client_fd, const char *body, size_t body_len
         return;
     }
 
-    if (run_conversation(topic, turns, participants, participant_count, ollama_url, &result, &error_message) != 0) {
+    if (send_chunked_header(client_fd, "200 OK", "application/x-ndjson") != 0) {
+        return;
+    }
+
+    json_object *start_event = json_object_new_object();
+    json_object *start_participants = json_object_new_array();
+    if (!start_event || !start_participants) {
+        if (start_event) {
+            json_object_put(start_event);
+        }
+        if (start_participants) {
+            json_object_put(start_participants);
+        }
+        send_stream_error_event(client_fd, "Failed to start stream.");
+        finish_chunked_response(client_fd);
+        return;
+    }
+
+    for (size_t i = 0; i < participant_count; ++i) {
+        json_object *participant_obj = json_object_new_object();
+        if (!participant_obj) {
+            json_object_put(start_participants);
+            json_object_put(start_event);
+            send_stream_error_event(client_fd, "Failed to start stream.");
+            finish_chunked_response(client_fd);
+            return;
+        }
+        json_object_object_add(participant_obj, "name", json_object_new_string(participants[i].name));
+        json_object_object_add(participant_obj, "model", json_object_new_string(participants[i].model));
+        json_object_array_add(start_participants, participant_obj);
+    }
+
+    json_object_object_add(start_event, "type", json_object_new_string("start"));
+    json_object_object_add(start_event, "topic", json_object_new_string(topic));
+    json_object_object_add(start_event, "turns", json_object_new_int(turns));
+    json_object_object_add(start_event, "participants", start_participants);
+
+    if (send_json_chunk(client_fd, start_event) != 0) {
+        json_object_put(start_event);
+        finish_chunked_response(client_fd);
+        return;
+    }
+    json_object_put(start_event);
+
+    struct StreamContext stream_ctx = {client_fd, 0};
+    if (run_conversation(topic, turns, participants, participant_count, ollama_url, stream_message_callback,
+                         &stream_ctx, &result, &error_message) != 0) {
+        if (!stream_ctx.failed) {
+            if (error_message) {
+                send_stream_error_event(client_fd, error_message);
+            } else {
+                send_stream_error_event(client_fd, "Conversation failed.");
+            }
+            finish_chunked_response(client_fd);
+        }
         if (error_message) {
-            send_http_error(client_fd, "500 Internal Server Error", error_message);
             free(error_message);
-        } else {
-            send_http_error(client_fd, "500 Internal Server Error", "Conversation failed.");
+        }
+        if (result) {
+            json_object_put(result);
         }
         return;
     }
 
-    const char *json_payload = json_object_to_json_string_ext(result, JSON_C_TO_STRING_PLAIN);
-    send_http_response(client_fd, "200 OK", "application/json", json_payload);
-    json_object_put(result);
+    if (!stream_ctx.failed) {
+        json_object *complete_event = json_object_new_object();
+        if (complete_event) {
+            json_object_object_add(complete_event, "type", json_object_new_string("complete"));
+            json_object_object_add(complete_event, "topic", json_object_new_string(topic));
+            json_object_object_add(complete_event, "turns", json_object_new_int(turns));
+            if (send_json_chunk(client_fd, complete_event) != 0) {
+                stream_ctx.failed = 1;
+            }
+            json_object_put(complete_event);
+        }
+    }
+
+    if (!stream_ctx.failed) {
+        finish_chunked_response(client_fd);
+    }
+
+    if (result) {
+        json_object_put(result);
+    }
+    if (error_message) {
+        free(error_message);
+    }
 }
 
 static void handle_client(int client_fd, const char *ollama_url) {
