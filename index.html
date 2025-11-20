@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>aiChat Arena (Browser Edition)</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: clamp(1.5rem, 3vw, 3rem); font-family: 'Segoe UI', 'Orbitron', 'Roboto', sans-serif; background: radial-gradient(circle at 20% 20%, rgba(56, 189, 248, 0.15), transparent 55%), radial-gradient(circle at 80% 0%, rgba(168, 85, 247, 0.12), transparent 45%), #020617; color: #e2e8f0; min-height: 100vh; display: flex; flex-direction: column; align-items: center; gap: 2.5rem; position: relative; overflow-x: hidden; }
+    body::before { content: ''; position: fixed; inset: -20vmax; background: conic-gradient(from 180deg at 50% 50%, rgba(56, 189, 248, 0.08), rgba(59, 130, 246, 0.16), rgba(168, 85, 247, 0.12), rgba(56, 189, 248, 0.08)); opacity: 0.65; filter: blur(120px); animation: auroraSpin 48s linear infinite; z-index: -2; pointer-events: none; }
+    body::after { content: ''; position: fixed; inset: -18vmax; background: radial-gradient(circle at 15% 25%, rgba(59, 130, 246, 0.22), transparent 55%), radial-gradient(circle at 85% 15%, rgba(168, 85, 247, 0.18), transparent 60%); opacity: 0.45; filter: blur(90px); animation: auroraPulse 32s ease-in-out infinite alternate; z-index: -3; pointer-events: none; }
+    @keyframes auroraSpin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+    @keyframes auroraPulse { 0% { opacity: 0.35; transform: scale(0.95); } 50% { opacity: 0.55; transform: scale(1.05); } 100% { opacity: 0.35; transform: scale(1); } }
+    
+    .card { position: relative; width: min(960px, 100%); background: rgba(15, 23, 42, 0.75); border-radius: 24px; padding: clamp(1.5rem, 3vw, 2.5rem); border: 1px solid rgba(148, 163, 184, 0.25); box-shadow: 0 40px 80px rgba(2, 6, 23, 0.6); backdrop-filter: blur(18px); overflow: hidden; transform-style: preserve-3d; transition: transform 0.6s cubic-bezier(0.22, 1, 0.36, 1), box-shadow 0.6s ease; }
+    .card::after { content: ''; position: absolute; inset: -40%; background: radial-gradient(circle at 30% 30%, rgba(56, 189, 248, 0.45), transparent 65%), radial-gradient(circle at 70% 10%, rgba(168, 85, 247, 0.35), transparent 60%); opacity: 0; transform: translate3d(0, 40px, 0) scale(0.95); filter: blur(40px); transition: opacity 0.6s ease, transform 0.6s cubic-bezier(0.22, 1, 0.36, 1); pointer-events: none; z-index: 0; }
+    .card > * { position: relative; z-index: 1; }
+    .card:hover { transform: translateY(-6px); box-shadow: 0 48px 120px rgba(2, 6, 23, 0.75); }
+    .card:hover::after { opacity: 1; transform: translate3d(0, 0, 0) scale(1.05); }
+    
+    h1 { margin-bottom: 0.25rem; font-size: clamp(1.9rem, 3vw, 2.4rem); letter-spacing: 0.08em; text-transform: uppercase; color: #f8fafc; }
+    h2 { margin-top: 0; letter-spacing: 0.06em; text-transform: uppercase; color: #cbd5f5; }
+    p { margin-top: 0; color: rgba(226, 232, 240, 0.85); }
+    
+    label { display: block; margin-top: 1.25rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: rgba(148, 163, 184, 0.9); }
+    input, select { width: 100%; padding: 0.75rem 1rem; margin-top: 0.5rem; border-radius: 12px; border: 1px solid rgba(148, 163, 184, 0.25); background: rgba(15, 23, 42, 0.6); color: #f8fafc; box-shadow: inset 0 0 0 rgba(15, 23, 42, 0.5); transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.3s ease; }
+    input:focus, select:focus { outline: none; border-color: rgba(94, 234, 212, 0.8); box-shadow: 0 0 0 3px rgba(94, 234, 212, 0.2); transform: translateY(-1px); }
+    input::placeholder { color: rgba(148, 163, 184, 0.6); }
+    
+    .settings-row { display: flex; gap: 1rem; align-items: flex-end; }
+    .settings-row > div { flex: 1; }
+
+    .actions { display: flex; gap: 0.75rem; flex-wrap: wrap; margin-top: 1.5rem; }
+    button { position: relative; padding: 0.85rem 1.8rem; border: none; border-radius: 999px; background: linear-gradient(120deg, #22d3ee, #a855f7); background-size: 220% 220%; color: #0b1120; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; cursor: pointer; transition: transform 0.25s ease, box-shadow 0.25s ease, background-position 0.4s ease; box-shadow: 0 12px 26px rgba(168, 85, 247, 0.35); }
+    button::after { content: ''; position: absolute; inset: -2px; border-radius: inherit; border: 1px solid rgba(255, 255, 255, 0.25); opacity: 0; transition: opacity 0.3s ease, transform 0.3s ease; pointer-events: none; }
+    button:hover { transform: translateY(-2px); box-shadow: 0 20px 45px rgba(168, 85, 247, 0.45); background-position: 100% 50%; }
+    button:hover::after { opacity: 1; transform: scale(1.03); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+    .participants { margin-top: 1.5rem; display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); perspective: 1200px; }
+    .participant { position: relative; border-radius: 18px; padding: 1.25rem; border: 1px solid var(--participant-border, rgba(148, 163, 184, 0.45)); background: var(--participant-surface, rgba(15, 23, 42, 0.6)); color: #e2e8f0; box-shadow: 0 0 32px var(--participant-glow, rgba(15, 23, 42, 0.8)); overflow: hidden; backdrop-filter: blur(12px); transform-style: preserve-3d; background-size: 180% 180%; transition: transform 0.6s cubic-bezier(0.22, 1, 0.36, 1), box-shadow 0.6s ease, border-color 0.3s ease; }
+    .participant::before { content: ''; position: absolute; inset: 0; background: var(--participant-pattern, rgba(94, 234, 212, 0.1)); opacity: 0.55; filter: blur(60px); z-index: 0; transition: opacity 0.6s ease, transform 0.6s ease; animation: participantDrift 24s linear infinite; }
+    .participant::after { content: ''; position: absolute; inset: 1px; border-radius: 16px; background: radial-gradient(circle at 20% 20%, var(--participant-highlight, rgba(255, 255, 255, 0.35)), transparent 55%); opacity: 0; mix-blend-mode: screen; transition: opacity 0.6s ease; z-index: 0; }
+    .participant > * { position: relative; z-index: 1; }
+    .participant:hover, .participant:focus-within { transform: translateY(-8px) rotate3d(1, -1, 0, 6deg); box-shadow: 0 32px 80px var(--participant-glow, rgba(15, 23, 42, 0.8)); }
+    .participant:hover::before, .participant:focus-within::before { opacity: 0.8; transform: scale(1.08); }
+    .participant:hover::after, .participant:focus-within::after { opacity: 0.85; }
+    @keyframes participantDrift { 0% { transform: scale(1) translate3d(0, 0, 0); } 50% { transform: scale(1.05) translate3d(-6px, 4px, 0); } 100% { transform: scale(1) translate3d(0, 0, 0); } }
+    
+    .participant button { margin-top: 1rem; width: fit-content; background: rgba(15, 23, 42, 0.65); color: #f8fafc; border: 1px solid rgba(148, 163, 184, 0.35); border-radius: 12px; padding: 0.5rem 1rem; letter-spacing: 0.05em; text-transform: none; font-size: 0.85rem; transition: transform 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease; }
+    .participant button:hover { color: #f87171; border-color: rgba(248, 113, 113, 0.8); box-shadow: 0 0 20px rgba(248, 113, 113, 0.25); transform: translateY(-1px); }
+
+    #status { margin-top: 1rem; font-weight: 600; color: #f97316; letter-spacing: 0.05em; opacity: 0; transform: translateY(-0.25rem); transition: opacity 0.35s ease, transform 0.35s ease; text-shadow: none; }
+    #status.status-active { opacity: 1; transform: translateY(0); }
+    #status.status-flash { animation: statusGlow 1.2s ease-out; }
+    @keyframes statusGlow { 0% { opacity: 0.6; text-shadow: 0 0 0 rgba(249, 115, 22, 0.75); } 45% { opacity: 1; text-shadow: 0 0 22px rgba(249, 115, 22, 0.85); } 100% { opacity: 1; text-shadow: none; } }
+    
+    #transcript { width: min(960px, 100%); }
+    .log { white-space: pre-wrap; background: rgba(15, 23, 42, 0.78); padding: clamp(1.25rem, 3vw, 2rem); border-radius: 24px; border: 1px solid rgba(148, 163, 184, 0.25); box-shadow: 0 24px 60px rgba(2, 6, 23, 0.65); backdrop-filter: blur(16px); }
+    
+    .message { padding: 1rem 1.25rem; border-radius: 16px; margin-bottom: 0.85rem; background: var(--message-bg, rgba(56, 189, 248, 0.12)); border-left: 4px solid var(--message-border, #38bdf8); box-shadow: 0 12px 28px var(--message-glow, rgba(15, 23, 42, 0.6)); color: #f8fafc; opacity: 0; transform: translateY(16px); transition: transform 0.55s cubic-bezier(0.23, 1, 0.32, 1), opacity 0.55s ease, box-shadow 0.55s ease; }
+    .message.is-visible { opacity: 1; transform: translateY(0); }
+    .message.message-enter { animation: messagePulse 1.2s ease-out forwards; }
+    @keyframes messagePulse { 0% { box-shadow: 0 0 0 0 var(--message-glow, rgba(56, 189, 248, 0.35)); } 55% { box-shadow: 0 0 36px var(--message-glow, rgba(56, 189, 248, 0.55)); } 100% { box-shadow: 0 12px 28px var(--message-glow, rgba(15, 23, 42, 0.6)); } }
+    .message strong { display: block; margin-bottom: 0.35rem; letter-spacing: 0.05em; text-transform: uppercase; color: rgba(226, 232, 240, 0.92); }
+    
+    /* Helper for config area */
+    .config-area { margin-bottom: 1.5rem; padding-bottom: 1.5rem; border-bottom: 1px solid rgba(148, 163, 184, 0.15); }
+    .config-toggle { background: none; border: none; color: rgba(148, 163, 184, 0.7); padding: 0; font-size: 0.9rem; cursor: pointer; text-transform: none; letter-spacing: normal; box-shadow: none; font-weight: normal; text-decoration: underline; display: block; margin-top: -1rem; margin-bottom: 1rem; }
+    .config-toggle:hover { color: #fff; background: none; transform: none; box-shadow: none; }
+    #configPanel { display: none; }
+    #configPanel.open { display: block; animation: slideDown 0.3s ease; }
+    @keyframes slideDown { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
+    
+    .checkbox-wrapper { margin-top: 1rem; display: flex; align-items: center; gap: 0.5rem; }
+    .checkbox-wrapper input { width: auto; margin: 0; box-shadow: none; }
+    .checkbox-wrapper label { margin: 0; font-size: 0.9rem; color: #e2e8f0; text-transform: none; font-weight: 400; }
+
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>aiChat Arena</h1>
+    <p>Configure friendly AI companions, pick their Ollama models, and watch them chat about your topic.</p>
+    
+    <button class="config-toggle" id="configToggle">Configure server settings</button>
+    <div id="configPanel" class="config-area">
+      <label for="ollamaUrl">Ollama API URL</label>
+      <input id="ollamaUrl" value="http://127.0.0.1:11434" placeholder="http://127.0.0.1:11434" />
+      
+      <div class="checkbox-wrapper">
+        <input type="checkbox" id="useSimulation">
+        <label for="useSimulation">Simulation Mode (Demo without Ollama)</label>
+      </div>
+      
+      <p style="font-size: 0.85rem; margin-top: 0.5rem; color: #94a3b8;">
+        <strong>Note:</strong> If connecting to localhost fails, your browser might be blocking mixed content (HTTP from HTTPS) or CORS is not set. 
+        <br>To fix, run Ollama with: <code>OLLAMA_ORIGINS="*" ollama serve</code>
+        <br>Or check "Simulation Mode" above to test the UI without connecting.
+      </p>
+      <button id="refreshModels" style="margin-top:0.75rem; padding: 0.5rem 1rem; font-size: 0.8rem;">Refresh Models</button>
+    </div>
+
+    <label for="topic">Conversation topic</label>
+    <input id="topic" placeholder="Space exploration strategies" />
+    
+    <label for="turns">Number of turns</label>
+    <input id="turns" type="number" min="1" max="12" value="3" />
+    
+    <div class="actions">
+      <button id="addParticipant">Add participant</button>
+      <button id="start">Start conversation</button>
+    </div>
+    
+    <div id="participants" class="participants"></div>
+    <div id="status"></div>
+  </div>
+  
+  <div id="transcript" class="log" style="display:none;">
+    <h2>Conversation transcript</h2>
+    <div id="messages"></div>
+  </div>
+
+  <script>
+    // --- Logic Ported from C Application ---
+
+    const SYSTEM_PROMPT = 
+    "You are a helpful and creative AI assistant in a conversation with other friendly AI " +
+    "companions. The user has started the conversation with a topic. Engage in a natural, " +
+    "back-and-forth discussion, building on what the other AI says. Keep your responses " +
+    "concise. Speak directly as your assigned participant without narrating the conversation " +
+    "structure, and never reveal your internal thinking—share only your final reply.\n\n";
+
+    // --- Utilities ---
+
+    // Removes <thinking> tags and similar metadata often found in CoT models
+    function sanitizeResponse(text, participantName) {
+        let result = text || "";
+
+        // Remove tagged sections (thinking, analysis, etc.)
+        const tags = ["thinking", "think", "analysis", "scratchpad"];
+        tags.forEach(tag => {
+            // Regex for <tag>...</tag>, [tag]...[/tag], {tag}...{/tag}
+            const regexAngle = new RegExp(`<${tag}>[\\s\\S]*?<\\/${tag}>`, "gi");
+            const regexSquare = new RegExp(`\\[${tag}\\][\\s\\S]*?\\[\\/${tag}\\]`, "gi");
+            const regexCurly = new RegExp(`\\{${tag}\\}[\\s\\S]*?\\{\\/${tag}\\}`, "gi");
+            result = result.replace(regexAngle, "").replace(regexSquare, "").replace(regexCurly, "");
+        });
+
+        // Remove specific metadata prefixes often output by local models
+        const metaPrefixes = ["thought:", "thinking:", "thoughts:", "analysis:", "reasoning:", "chain of thought:", "internal monologue:", "plan:"];
+        // Check start of string
+        const trimmed = result.trim();
+        for (const prefix of metaPrefixes) {
+            if (trimmed.toLowerCase().startsWith(prefix)) {
+                // Try to find where the actual answer starts
+                const answerMarkers = ["\nanswer:", "\nfinal answer:", "\nresponse:", "\nreply:", "\nfinal:", "\noutput:"];
+                let cutPoint = -1;
+                for (const marker of answerMarkers) {
+                    const idx = trimmed.toLowerCase().indexOf(marker);
+                    if (idx !== -1) {
+                        cutPoint = idx + marker.length; // move past the marker
+                        break;
+                    }
+                }
+                if (cutPoint !== -1) {
+                    result = trimmed.substring(cutPoint);
+                } else {
+                    // aggressive fallback: if double newline exists, take everything after it
+                    const dnl = trimmed.indexOf("\n\n");
+                    if (dnl !== -1) result = trimmed.substring(dnl);
+                }
+                break;
+            }
+        }
+
+        // Remove "Name:" prefixes (e.g. "Alice: Hello" -> "Hello")
+        // This regex looks for "Name:" or "Name (Context):" at the start
+        if (participantName) {
+            // Escape regex special chars in name
+            const escapedName = participantName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const nameRegex = new RegExp(`^${escapedName}(?:\\s*\\([^)]+\\))?\\s*:\\s*`, "i");
+            result = result.trim().replace(nameRegex, "");
+        }
+        
+        // Cleanup generic prefixes
+        result = result.replace(/^(answer|final answer|response|reply|output):\s*/i, "");
+
+        return result.trim();
+    }
+
+    // --- UI & Application State ---
+
+    const participantsEl = document.getElementById('participants');
+    const statusEl = document.getElementById('status');
+    const messagesEl = document.getElementById('messages');
+    const transcriptEl = document.getElementById('transcript');
+    const configPanel = document.getElementById('configPanel');
+    
+    let availableModels = [];
+    const participantStyles = new Map();
+    const modelSelects = new Set();
+
+    // Toggle Config
+    document.getElementById('configToggle').addEventListener('click', () => {
+        configPanel.classList.toggle('open');
+    });
+
+    document.getElementById('refreshModels').addEventListener('click', loadModels);
+
+    // Status helper
+    statusEl.addEventListener('animationend', (event) => {
+      if (event.animationName === 'statusGlow') statusEl.classList.remove('status-flash');
+    });
+
+    function setStatus(message) {
+      const text = message ? String(message) : '';
+      const active = Boolean(text);
+      statusEl.textContent = text;
+      statusEl.classList.toggle('status-active', active);
+      if (active) {
+        statusEl.classList.remove('status-flash');
+        void statusEl.offsetWidth; // trigger reflow
+        statusEl.classList.add('status-flash');
+      }
+    }
+
+    // --- Palette & Visuals ---
+    
+    const basePalette = [
+      { messageBackground: 'linear-gradient(135deg, rgba(56, 189, 248, 0.18), rgba(59, 130, 246, 0.45))', border: '#38bdf8', glow: 'rgba(56, 189, 248, 0.45)', cardBackground: 'linear-gradient(160deg, rgba(12, 74, 110, 0.85), rgba(37, 99, 235, 0.75))', cardPattern: 'radial-gradient(circle at 20% 20%, rgba(14, 165, 233, 0.35) 0, transparent 45%), radial-gradient(circle at 80% 0%, rgba(59, 130, 246, 0.3) 0, transparent 40%)' },
+      { messageBackground: 'linear-gradient(135deg, rgba(244, 114, 182, 0.2), rgba(236, 72, 153, 0.45))', border: '#f472b6', glow: 'rgba(244, 114, 182, 0.45)', cardBackground: 'linear-gradient(160deg, rgba(88, 28, 135, 0.82), rgba(162, 28, 175, 0.78))', cardPattern: 'radial-gradient(circle at 25% 20%, rgba(249, 168, 212, 0.32) 0, transparent 42%), radial-gradient(circle at 80% 10%, rgba(236, 72, 153, 0.28) 0, transparent 38%)' },
+      { messageBackground: 'linear-gradient(135deg, rgba(52, 211, 153, 0.2), rgba(16, 185, 129, 0.45))', border: '#34d399', glow: 'rgba(16, 185, 129, 0.4)', cardBackground: 'linear-gradient(160deg, rgba(4, 47, 46, 0.85), rgba(13, 148, 136, 0.78))', cardPattern: 'radial-gradient(circle at 18% 22%, rgba(94, 234, 212, 0.32) 0, transparent 45%), radial-gradient(circle at 82% 12%, rgba(16, 185, 129, 0.3) 0, transparent 40%)' },
+      { messageBackground: 'linear-gradient(135deg, rgba(251, 191, 36, 0.2), rgba(249, 115, 22, 0.45))', border: '#f59e0b', glow: 'rgba(251, 146, 60, 0.45)', cardBackground: 'linear-gradient(160deg, rgba(88, 40, 12, 0.85), rgba(234, 88, 12, 0.75))', cardPattern: 'radial-gradient(circle at 24% 16%, rgba(251, 191, 36, 0.32) 0, transparent 44%), radial-gradient(circle at 78% 10%, rgba(249, 115, 22, 0.28) 0, transparent 40%)' },
+      { messageBackground: 'linear-gradient(135deg, rgba(129, 140, 248, 0.2), rgba(99, 102, 241, 0.45))', border: '#818cf8', glow: 'rgba(129, 140, 248, 0.45)', cardBackground: 'linear-gradient(160deg, rgba(30, 41, 102, 0.85), rgba(76, 29, 149, 0.78))', cardPattern: 'radial-gradient(circle at 22% 24%, rgba(129, 140, 248, 0.32) 0, transparent 46%), radial-gradient(circle at 84% 14%, rgba(165, 180, 252, 0.28) 0, transparent 40%)' },
+      { messageBackground: 'linear-gradient(135deg, rgba(45, 212, 191, 0.2), rgba(59, 130, 246, 0.42))', border: '#5eead4', glow: 'rgba(56, 189, 248, 0.38)', cardBackground: 'linear-gradient(160deg, rgba(8, 47, 73, 0.85), rgba(30, 64, 175, 0.78))', cardPattern: 'radial-gradient(circle at 28% 18%, rgba(56, 189, 248, 0.32) 0, transparent 42%), radial-gradient(circle at 76% 8%, rgba(45, 212, 191, 0.28) 0, transparent 38%)' }
+    ];
+
+    function getPaletteForIndex(index) {
+      const idx = Math.max(0, index);
+      if (idx < basePalette.length) return { ...basePalette[idx] };
+      
+      // Procedural generation for index > 6
+      const hue = (idx * 47) % 360;
+      const accent = (hue + 60) % 360;
+      return {
+        messageBackground: `linear-gradient(135deg, hsla(${hue}, 80%, 22%, 0.55), hsla(${accent}, 85%, 36%, 0.75))`,
+        border: `hsla(${accent}, 90%, 65%, 1)`,
+        glow: `hsla(${accent}, 90%, 70%, 0.45)`,
+        cardBackground: `linear-gradient(160deg, hsla(${hue}, 65%, 16%, 0.9), hsla(${accent}, 70%, 22%, 0.95))`,
+        cardPattern: `radial-gradient(circle at 20% 25%, hsla(${accent}, 85%, 60%, 0.35) 0, transparent 42%), radial-gradient(circle at 80% 10%, hsla(${hue}, 85%, 55%, 0.3) 0, transparent 38%)`
+      };
+    }
+
+    function updateParticipantCardThemes() {
+      const cards = Array.from(participantsEl.querySelectorAll('.participant'));
+      cards.forEach((card, index) => {
+        const palette = getPaletteForIndex(index);
+        card.style.setProperty('--participant-border', palette.border);
+        card.style.setProperty('--participant-pattern', palette.cardPattern);
+        card.style.setProperty('--participant-surface', palette.cardBackground);
+        card.style.setProperty('--participant-glow', palette.glow);
+        card.style.setProperty('--participant-highlight', palette.border);
+      });
+    }
+
+    // --- Chat UI Operations ---
+
+    function appendMessage(message) {
+      const item = document.createElement('div');
+      item.className = 'message message-enter';
+      
+      const palette = getPaletteForIndex(message.participantIndex);
+      item.style.setProperty('--message-bg', palette.messageBackground);
+      item.style.setProperty('--message-border', palette.border);
+      item.style.setProperty('--message-glow', palette.glow);
+
+      const header = `<strong>${message.name} <span style="color:#94a3b8; font-weight:400;">(${message.model})</span></strong>`;
+      
+      // Convert newlines to breaks for basic formatting
+      const formattedText = message.text.replace(/\n/g, '<br>');
+      item.innerHTML = `${header}${formattedText}`;
+      
+      messagesEl.appendChild(item);
+      
+      item.addEventListener('animationend', (e) => {
+        if (e.animationName === 'messagePulse') item.classList.remove('message-enter');
+      });
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => item.classList.add('is-visible'));
+      });
+      
+      transcriptEl.style.display = 'block';
+      transcriptEl.scrollTop = transcriptEl.scrollHeight;
+    }
+
+    // --- Model Management ---
+
+    async function loadModels() {
+        const isSimulation = document.getElementById('useSimulation').checked;
+        
+        if (isSimulation) {
+             availableModels = [
+                { name: "Simulated-Gemma:2b" },
+                { name: "Simulated-Llama3:8b" },
+                { name: "Simulated-Mistral" },
+                { name: "Simulated-Phi3" }
+             ];
+             refreshModelSelects();
+             setStatus('Simulation mode active.');
+             return;
+        }
+
+        const baseUrl = document.getElementById('ollamaUrl').value.replace(/\/$/, '');
+        setStatus('Connecting to Ollama...');
+        
+        try {
+            const response = await fetch(`${baseUrl}/api/tags`);
+            if (!response.ok) throw new Error("Failed to fetch models");
+            
+            const data = await response.json();
+            availableModels = data.models || [];
+            
+            refreshModelSelects();
+            setStatus('');
+        } catch (err) {
+            console.error("Ollama Connection Error:", err);
+            availableModels = [];
+            refreshModelSelects();
+            setStatus('Error: Connection failed. Check "Simulation Mode" in Config?');
+        }
+    }
+
+    function populateModelOptions(select, selectedModel) {
+        select.innerHTML = '';
+        
+        // Placeholder
+        const isError = statusEl.textContent.includes('Error') || statusEl.textContent.includes('Connection failed');
+        
+        const placeholder = document.createElement('option');
+        placeholder.value = '';
+        
+        if (availableModels.length) {
+            placeholder.textContent = 'Select a model';
+        } else if (isError) {
+            placeholder.textContent = 'Connection Failed (See Config)';
+        } else {
+            placeholder.textContent = 'Loading...';
+        }
+        
+        placeholder.disabled = true;
+        placeholder.selected = !selectedModel;
+        select.appendChild(placeholder);
+
+        availableModels.forEach(m => {
+            const option = document.createElement('option');
+            option.value = m.name; // Ollama API v1 uses 'name' as the identifier ID often
+            option.textContent = m.name;
+            if (m.name === selectedModel) option.selected = true;
+            select.appendChild(option);
+        });
+    }
+
+    function refreshModelSelects() {
+        modelSelects.forEach(select => {
+            const currentVal = select.value;
+            populateModelOptions(select, currentVal);
+        });
+    }
+
+    function createParticipant(name, model) {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'participant';
+        wrapper.innerHTML = `
+            <label>Friendly name</label>
+            <input name="name" placeholder="Astra" value="${name || ''}" />
+            <label>Ollama model</label>
+            <select name="model"></select>
+            <button type="button" class="remove">Remove</button>
+        `;
+        
+        const select = wrapper.querySelector('select');
+        modelSelects.add(select);
+        populateModelOptions(select, model);
+
+        wrapper.querySelector('.remove').addEventListener('click', () => {
+            modelSelects.delete(select);
+            participantsEl.removeChild(wrapper);
+            updateParticipantCardThemes();
+        });
+
+        participantsEl.appendChild(wrapper);
+        updateParticipantCardThemes();
+    }
+
+    document.getElementById('addParticipant').addEventListener('click', (e) => {
+        e.preventDefault();
+        createParticipant('', '');
+    });
+    
+    // Listen for simulation toggle to reload models list
+    document.getElementById('useSimulation').addEventListener('change', loadModels);
+
+    // --- The Core Logic (Replacing C backend) ---
+
+    function getSimulatedResponse(participantName, model, topic) {
+        const phrases = [
+            "That is a fascinating point regarding " + topic + ".",
+            "I completely agree. We must also consider the implications.",
+            "From my perspective as " + model + ", this works well.",
+            "Interesting! Let's explore that further.",
+            "I think we are making great progress on this topic."
+        ];
+        return phrases[Math.floor(Math.random() * phrases.length)];
+    }
+
+    document.getElementById('start').addEventListener('click', async (e) => {
+        e.preventDefault();
+        
+        // 1. Gather Config
+        const baseUrl = document.getElementById('ollamaUrl').value.replace(/\/$/, '');
+        const topic = document.getElementById('topic').value.trim();
+        const turns = parseInt(document.getElementById('turns').value, 10);
+        const isSimulation = document.getElementById('useSimulation').checked;
+        
+        // 2. Gather Participants
+        const participantDivs = participantsEl.querySelectorAll('.participant');
+        const participants = [];
+        participantDivs.forEach((div, index) => {
+            const name = div.querySelector('input[name="name"]').value.trim() || `Companion ${index + 1}`;
+            const model = div.querySelector('select').value;
+            if (model) {
+                participants.push({ name, model, index });
+            }
+        });
+
+        // 3. Validation
+        if (!topic) return setStatus('Please provide a topic.');
+        if (!turns || turns < 1) return setStatus('Please set turns.');
+        if (participants.length < 1) return setStatus('Add at least one participant with a model.');
+
+        // 4. Setup UI for run
+        setStatus('Starting conversation...');
+        messagesEl.innerHTML = '';
+        transcriptEl.style.display = 'none';
+        
+        // 5. Initialize History
+        let history = SYSTEM_PROMPT + "USER: " + topic;
+
+        // 6. Run Loop
+        try {
+            for (let turn = 1; turn <= turns; turn++) {
+                for (const p of participants) {
+                    setStatus(`Turn ${turn}/${turns}: Waiting for ${p.name} (${p.model})...`);
+                    
+                    let cleanText = "";
+
+                    if (isSimulation) {
+                        // Simulate network delay
+                        await new Promise(r => setTimeout(r, 1500));
+                        cleanText = getSimulatedResponse(p.name, p.model, topic);
+                    } else {
+                        // Construct prompt entry for this participant
+                        const prefix = `\n\n${p.name}:`;
+                        const fullPrompt = history + prefix;
+
+                        // Call Ollama
+                        const response = await fetch(`${baseUrl}/api/generate`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                model: p.model,
+                                prompt: fullPrompt,
+                                stream: false,
+                                options: {
+                                    stop: ["User:", "USER:", "\n\n"] // Stop tokens to prevent rambling
+                                }
+                            })
+                        });
+
+                        if (!response.ok) throw new Error(`Ollama error: ${response.statusText}`);
+                        
+                        const data = await response.json();
+                        const rawText = data.response;
+                        cleanText = sanitizeResponse(rawText, p.name);
+                    }
+
+                    if (!cleanText) cleanText = "(No response)";
+
+                    // Update History
+                    history += `\n\n${p.name}: ` + cleanText;
+
+                    // Update UI
+                    appendMessage({
+                        participantIndex: p.index,
+                        name: p.name,
+                        model: p.model,
+                        text: cleanText
+                    });
+                }
+            }
+            setStatus('Conversation complete.');
+        } catch (error) {
+            console.error(error);
+            let msg = error.message;
+            if (msg.includes('Failed to fetch')) {
+                 msg = "Connection Failed. Try enabling Simulation Mode in Config?";
+            }
+            setStatus(`Error: ${msg}`);
+        }
+    });
+
+    // Initial load
+    createParticipant('Astra', '');
+    createParticipant('Nova', '');
+    loadModels(); // Attempt to load on startup
+
+  </script>
+</body>
+</html>
