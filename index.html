@@ -65,6 +65,10 @@
     @keyframes messagePulse { 0% { box-shadow: 0 0 0 0 var(--message-glow, rgba(56, 189, 248, 0.35)); } 55% { box-shadow: 0 0 36px var(--message-glow, rgba(56, 189, 248, 0.55)); } 100% { box-shadow: 0 12px 28px var(--message-glow, rgba(15, 23, 42, 0.6)); } }
     .message strong { display: block; margin-bottom: 0.35rem; letter-spacing: 0.05em; text-transform: uppercase; color: rgba(226, 232, 240, 0.92); }
     
+    /* Summary Style */
+    .message.message-summary { background: linear-gradient(135deg, rgba(13, 148, 136, 0.28), rgba(14, 165, 233, 0.3)); border-left-color: #06b6d4; font-style: italic; }
+    .message.message-summary strong { letter-spacing: 0.12em; color: #bae6fd; }
+
     /* Helper for config area */
     .config-area { margin-bottom: 1.5rem; padding-bottom: 1.5rem; border-bottom: 1px solid rgba(148, 163, 184, 0.15); }
     .config-toggle { background: none; border: none; color: rgba(148, 163, 184, 0.7); padding: 0; font-size: 0.9rem; cursor: pointer; text-transform: none; letter-spacing: normal; box-shadow: none; font-weight: normal; text-decoration: underline; display: block; margin-top: -1rem; margin-bottom: 1rem; }
@@ -201,6 +205,12 @@
     let availableModels = [];
     const participantStyles = new Map();
     const modelSelects = new Set();
+    
+    // Transcript state for summarization
+    const transcriptMessages = [];
+    let currentParticipants = [];
+    let currentTurns = 0;
+    let currentTopic = "";
 
     // Toggle Config
     document.getElementById('configToggle').addEventListener('click', () => {
@@ -271,18 +281,37 @@
       const item = document.createElement('div');
       item.className = 'message message-enter';
       
-      const palette = getPaletteForIndex(message.participantIndex);
+      if (message.isSummary) {
+        item.classList.add('message-summary');
+      }
+      
+      // Use palette index if present, else 0 (for summary)
+      const paletteIndex = (typeof message.participantIndex === 'number' && message.participantIndex >= 0) 
+          ? message.participantIndex 
+          : 0;
+      
+      const palette = getPaletteForIndex(paletteIndex);
       item.style.setProperty('--message-bg', palette.messageBackground);
       item.style.setProperty('--message-border', palette.border);
       item.style.setProperty('--message-glow', palette.glow);
 
-      const header = `<strong>${message.name} <span style="color:#94a3b8; font-weight:400;">(${message.model})</span></strong>`;
+      let header = '';
+      if (!message.isSummary) {
+          header = `<strong>${message.name} <span style="color:#94a3b8; font-weight:400;">(${message.model})</span></strong>`;
+      } else {
+          header = `<strong>${message.name}</strong>`;
+      }
       
       // Convert newlines to breaks for basic formatting
       const formattedText = message.text.replace(/\n/g, '<br>');
       item.innerHTML = `${header}${formattedText}`;
       
       messagesEl.appendChild(item);
+      
+      // Record transcript for summary generation later
+      if (!message.isSummary) {
+          transcriptMessages.push({ name: message.name, text: message.text });
+      }
       
       item.addEventListener('animationend', (e) => {
         if (e.animationName === 'messagePulse') item.classList.remove('message-enter');
@@ -293,6 +322,96 @@
       
       transcriptEl.style.display = 'block';
       transcriptEl.scrollTop = transcriptEl.scrollHeight;
+    }
+
+    // --- Summarization Logic (Restored from original) ---
+
+    function extractPlainText(html) {
+      if (!html) return '';
+      const temp = document.createElement('div');
+      temp.innerHTML = html;
+      const text = temp.textContent || temp.innerText || '';
+      return text.replace(/\s+/g, ' ').trim();
+    }
+
+    function selectSentenceSnippet(text, maxLength) {
+      if (!text) return '';
+      const plain = text.replace(/<[^>]+>/g, ''); // simple strip tags
+      const sentenceMatch = plain.match(/[^.!?]+[.!?]?/);
+      let sentence = sentenceMatch ? sentenceMatch[0].trim() : plain.trim();
+      const limit = (typeof maxLength === 'number' && maxLength > 0) ? maxLength : 160;
+      if (sentence.length > limit) {
+        sentence = `${sentence.slice(0, limit - 3).replace(/\s+$/g, '')}…`;
+      }
+      return sentence;
+    }
+
+    function formatParticipantSubject(names) {
+      if (!Array.isArray(names) || names.length === 0) return 'The participants';
+      if (names.length === 1) return names[0];
+      if (names.length === 2) return `${names[0]} and ${names[1]}`;
+      const allButLast = names.slice(0, -1).join(', ');
+      const last = names[names.length - 1];
+      return `${allButLast}, and ${last}`;
+    }
+
+    function resolveTopicSummary() {
+      // Try to use first sentence of conversation if topic looks like a date or empty
+      const trimmedTopic = typeof currentTopic === 'string' ? currentTopic.trim() : '';
+      const isoDateTime = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/i;
+      const isoDateOnly = /^\d{4}-\d{2}-\d{2}$/;
+      if (trimmedTopic && !isoDateTime.test(trimmedTopic) && !isoDateOnly.test(trimmedTopic)) {
+        return { text: trimmedTopic, derived: false };
+      }
+      for (const entry of transcriptMessages) {
+        const snippet = selectSentenceSnippet(entry && entry.text, 120);
+        if (snippet) return { text: snippet, derived: true };
+      }
+      return { text: 'their discussion', derived: true };
+    }
+
+    function summariseDiscussionIfNeeded() {
+      if (transcriptMessages.length === 0) return;
+      
+      const participantNames = currentParticipants.map(p => p.name).filter(n => n);
+      const subject = formatParticipantSubject(participantNames);
+      const topicSummary = resolveTopicSummary();
+      const turnsValue = (typeof currentTurns === 'number' && currentTurns > 0) ? currentTurns : transcriptMessages.length;
+      const turnsText = turnsValue === 1 ? '1 turn' : `${turnsValue} turns`;
+      
+      // Get latest snippet from each participant
+      const latestByParticipant = new Map();
+      transcriptMessages.forEach((entry) => {
+        if (entry.name) latestByParticipant.set(entry.name, entry.text || '');
+      });
+      
+      const highlightSnippets = [];
+      latestByParticipant.forEach((text, name) => {
+        const sentence = selectSentenceSnippet(text, 160);
+        if (sentence) highlightSnippets.push(`${name}: ${sentence}`);
+      });
+      
+      const highlightsText = highlightSnippets.length ? ` Highlights — ${highlightSnippets.join(' | ')}` : '';
+      
+      let summaryBody = '';
+      if (!topicSummary.text) {
+        summaryBody = `${subject} chatted over ${turnsText}.`;
+      } else if (topicSummary.text === 'their discussion') {
+        summaryBody = `${subject} shared their thoughts over ${turnsText}.`;
+      } else if (topicSummary.derived) {
+        summaryBody = `${subject} explored ${topicSummary.text} over ${turnsText}.`;
+      } else {
+        summaryBody = `${subject} discussed "${topicSummary.text}" over ${turnsText}.`;
+      }
+      summaryBody += highlightsText;
+      
+      appendMessage({
+        participantIndex: -1,
+        name: 'Summary',
+        model: '',
+        text: `<p>${summaryBody}</p>`,
+        isSummary: true
+      });
     }
 
     // --- Model Management ---
@@ -445,8 +564,12 @@
         messagesEl.innerHTML = '';
         transcriptEl.style.display = 'none';
         
-        // 5. Initialize History
+        // 5. Reset History/Transcript State
         let history = SYSTEM_PROMPT + "USER: " + topic;
+        transcriptMessages.length = 0; // clear transcript
+        currentParticipants = participants;
+        currentTurns = turns;
+        currentTopic = topic;
 
         // 6. Run Loop
         try {
@@ -500,7 +623,11 @@
                     });
                 }
             }
+            
+            // Conversation complete, trigger summary
             setStatus('Conversation complete.');
+            summariseDiscussionIfNeeded();
+            
         } catch (error) {
             console.error(error);
             let msg = error.message;
